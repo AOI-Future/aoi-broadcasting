@@ -31,7 +31,7 @@ docker logs -f aoi-broadcasting
 | `KICK_URL` | At least one pair | RTMP ingest URL for Kick |
 | `KICK_KEY` | At least one pair | Kick stream key |
 | `ARCHIVE_DAYS` | Optional | Days before music files are moved to `archive/` (default: 30) |
-| `ARCHIVE_RETENTION_DAYS` | Optional | Days before archived files are deleted (default: 90) |
+| `ARCHIVE_RETENTION_DAYS` | Optional | Days before archived files are deleted (default: 0 = disabled) |
 | `WAIT_NO_MUSIC` | Optional | Seconds to wait before rechecking when no music is found (default: 30) |
 | `RESTART_DELAY` | Optional | Base seconds before restarting after ffmpeg exits (default: 5) |
 | `MAX_RESTART_DELAY` | Optional | Max seconds for exponential backoff after ffmpeg failures (default: 60) |
@@ -119,11 +119,12 @@ Check stream keys are valid and the ingest server is reachable. The container wi
 
 ## Monitoring (Prometheus)
 
-このリポジトリは Prometheus 監視の実装を内蔵していないため、運用環境側で以下の前提条件と設定を用意してください。
+このリポジトリは Prometheus 監視の実装を内蔵していないため、必要に応じて運用環境側で以下の前提条件と設定を用意してください。
+Prometheus を導入しない場合は、`docker logs -f aoi-broadcasting` による基本監視でも運用可能です。
 
 ### 前提条件
 
-- **Prometheus サーバが稼働していること**（v2.x 系を想定）
+- **Prometheus サーバが稼働していること**（v2.x 系を想定、任意）
 - **監視対象ホストにエクスポータが導入されていること**
   - 推奨: `node_exporter`（CPU/メモリ/ディスク）
   - 推奨: `cadvisor`（コンテナのCPU/メモリ/ネットワーク）
