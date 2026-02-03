@@ -30,8 +30,25 @@ docker logs -f aoi-broadcasting
 | `YOUTUBE_KEY` | At least one pair | YouTube stream key |
 | `KICK_URL` | At least one pair | RTMP ingest URL for Kick |
 | `KICK_KEY` | At least one pair | Kick stream key |
+| `ARCHIVE_DAYS` | Optional | Days before music files are moved to `archive/` (default: 30) |
+| `ARCHIVE_RETENTION_DAYS` | Optional | Days before archived files are deleted (default: 90) |
+| `WAIT_NO_MUSIC` | Optional | Seconds to wait before rechecking when no music is found (default: 30) |
+| `RESTART_DELAY` | Optional | Base seconds before restarting after ffmpeg exits (default: 5) |
+| `MAX_RESTART_DELAY` | Optional | Max seconds for exponential backoff after ffmpeg failures (default: 60) |
+| `LOG_LEVEL` | Optional | Logging level (default: INFO) |
 
 At least one destination (YouTube or Kick) must be configured.
+
+## Security Hardening
+
+デフォルトの `docker-compose.yml` は長期運用向けに以下の設定を有効化しています。
+
+- **非rootユーザーで実行**（UID/GID: `10001`）
+- **`read_only: true`** によるルートFSの書き込み禁止
+- **`no-new-privileges` と `cap_drop: ALL`** による権限削減
+- **`/tmp` を tmpfs でマウント**（一時ファイル専用）
+
+ホスト側の `music/` と `archive/` ディレクトリは UID/GID `10001` が書き込める権限にしてください。
 
 ## Architecture
 
@@ -99,6 +116,46 @@ Place a JPG or PNG image in `assets/` directory.
 
 ### ffmpeg exits immediately
 Check stream keys are valid and the ingest server is reachable. The container will automatically retry after 5 seconds.
+
+## Monitoring (Prometheus)
+
+このリポジトリは Prometheus 監視の実装を内蔵していないため、運用環境側で以下の前提条件と設定を用意してください。
+
+### 前提条件
+
+- **Prometheus サーバが稼働していること**（v2.x 系を想定）
+- **監視対象ホストにエクスポータが導入されていること**
+  - 推奨: `node_exporter`（CPU/メモリ/ディスク）
+  - 推奨: `cadvisor`（コンテナのCPU/メモリ/ネットワーク）
+- **Docker のメトリクス取得が許可されていること**
+  - `cadvisor` か Docker Engine API へのアクセス権
+
+### 必要な設定（例）
+
+1. **node_exporter**
+   - ポート: `9100`
+   - 例: `docker run -d --name node_exporter -p 9100:9100 prom/node-exporter`
+2. **cadvisor**
+   - ポート: `8080`
+   - 例: `docker run -d --name cadvisor -p 8080:8080 --privileged gcr.io/cadvisor/cadvisor:latest`
+3. **Prometheus の scrape 設定**
+   ```yaml
+   scrape_configs:
+     - job_name: "node_exporter"
+       static_configs:
+         - targets: ["<server-ip>:9100"]
+     - job_name: "cadvisor"
+       static_configs:
+         - targets: ["<server-ip>:8080"]
+   ```
+
+### 推奨アラート（例）
+
+- **ディスク使用率が高い**（アーカイブの増加を検知）
+- **コンテナ再起動が頻発**（ffmpeg の失敗を検知）
+- **配信先へのネットワーク不通**（RTMP 接続失敗率）
+
+上記は運用環境の構成に合わせて調整してください。
 
 ## License
 
