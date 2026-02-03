@@ -39,6 +39,17 @@ docker logs -f aoi-broadcasting
 
 At least one destination (YouTube or Kick) must be configured.
 
+## Security Hardening
+
+デフォルトの `docker-compose.yml` は長期運用向けに以下の設定を有効化しています。
+
+- **非rootユーザーで実行**（UID/GID: `10001`）
+- **`read_only: true`** によるルートFSの書き込み禁止
+- **`no-new-privileges` と `cap_drop: ALL`** による権限削減
+- **`/tmp` を tmpfs でマウント**（一時ファイル専用）
+
+ホスト側の `music/` と `archive/` ディレクトリは UID/GID `10001` が書き込める権限にしてください。
+
 ## Architecture
 
 ```
