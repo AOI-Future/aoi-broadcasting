@@ -50,7 +50,7 @@ def _env_int(name: str, default: int, minimum: int | None = None) -> int:
 
 
 ARCHIVE_DAYS = _env_int("ARCHIVE_DAYS", 30, minimum=1)
-ARCHIVE_RETENTION_DAYS = _env_int("ARCHIVE_RETENTION_DAYS", 90, minimum=1)
+ARCHIVE_RETENTION_DAYS = _env_int("ARCHIVE_RETENTION_DAYS", 0, minimum=0)
 WAIT_NO_MUSIC = _env_int("WAIT_NO_MUSIC", 30, minimum=5)  # seconds to wait when no music found
 RESTART_DELAY = _env_int("RESTART_DELAY", 5, minimum=1)   # seconds before restarting after ffmpeg exits
 MAX_RESTART_DELAY = _env_int("MAX_RESTART_DELAY", 60, minimum=5)
@@ -110,12 +110,6 @@ def collect_tracks() -> list[Path]:
     tracks = []
     for track in MUSIC_DIR.glob("*.wav"):
         if not track.is_file() or track.is_symlink():
-            continue
-        try:
-            resolved = track.resolve()
-        except RuntimeError:
-            continue
-        if MUSIC_DIR not in resolved.parents:
             continue
         tracks.append(track)
     tracks.sort()
