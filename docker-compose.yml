@@ -1,0 +1,11 @@
+services:
+  streamer:
+    build: .
+    container_name: aoi-broadcasting
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./music:/data/music
+      - ./archive:/data/archive
+      - ./assets:/app/assets:ro
