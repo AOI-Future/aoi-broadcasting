@@ -144,25 +144,46 @@ def _valid_rtmp_target(url: str) -> bool:
     return bool(parsed.netloc)
 
 
+def _valid_stream_key(key: str) -> bool:
+    """Reject keys that can break tee syntax or contain control characters."""
+    if not key:
+        return False
+    if any(ch in key for ch in "|[]"):
+        return False
+    if any(ord(ch) < 32 for ch in key):
+        return False
+    return key == key.strip()
+
+
+def _build_target(base_url: str, stream_key: str, platform: str) -> str | None:
+    base_url = base_url.rstrip("/")
+    stream_key = stream_key.strip()
+    target = f"{base_url}/{stream_key}"
+
+    if not _valid_rtmp_target(target):
+        log.warning("Invalid %s URL; expected rtmp/rtmps scheme", platform)
+        return None
+    if not _valid_stream_key(stream_key):
+        log.warning("Invalid %s stream key format", platform)
+        return None
+    return target
+
+
 def build_outputs() -> str:
     """Build tee muxer output string for configured destinations."""
     outputs = []
 
     if YOUTUBE_URL and YOUTUBE_KEY:
-        yt = f"{YOUTUBE_URL}/{YOUTUBE_KEY}"
-        if _valid_rtmp_target(yt):
+        yt = _build_target(YOUTUBE_URL, YOUTUBE_KEY, "YouTube")
+        if yt:
             outputs.append(f"[f=flv]{yt}")
             log.info("YouTube output configured")
-        else:
-            log.warning("Invalid YouTube URL; expected rtmp/rtmps scheme")
 
     if KICK_URL and KICK_KEY:
-        kick = f"{KICK_URL}/{KICK_KEY}"
-        if _valid_rtmp_target(kick):
+        kick = _build_target(KICK_URL, KICK_KEY, "Kick")
+        if kick:
             outputs.append(f"[f=flv]{kick}")
             log.info("Kick output configured")
-        else:
-            log.warning("Invalid Kick URL; expected rtmp/rtmps scheme")
 
     if not outputs:
         log.error("No stream destinations configured. Set YOUTUBE_URL/KEY or KICK_URL/KEY.")
@@ -184,7 +205,9 @@ def _ensure_loop_video():
             return
         log.info("Background updated; regenerating loop video")
     log.info("Pre-encoding loop video from %s ...", BACKGROUND.name)
-    tmp = Path(tempfile.mkstemp(suffix=".flv")[1])
+    fd, tmp_path = tempfile.mkstemp(suffix=".flv")
+    os.close(fd)
+    tmp = Path(tmp_path)
     subprocess.run(
         [
             "ffmpeg", "-y",

@@ -37,6 +37,7 @@ docker logs -f aoi-broadcasting
 | `MAX_RESTART_DELAY` | Optional | Max seconds for exponential backoff after ffmpeg failures (default: 60) |
 | `MAINTENANCE_INTERVAL` | Optional | Seconds between archive/prune scans to reduce I/O load (default: 900) |
 | `LOG_LEVEL` | Optional | Logging level (default: INFO) |
+| `STREAM_KEY` format | Note | Keys with leading/trailing spaces, control characters, or `|[]` are rejected for safety |
 
 At least one destination (YouTube or Kick) must be configured.
 
@@ -108,6 +109,7 @@ Place WAV files in `music/` directory. The streamer will detect them on the next
 No stream destinations configured. Set YOUTUBE_URL/KEY or KICK_URL/KEY.
 ```
 Check `.env` file — at least one YouTube or Kick destination is required.
+`|` や `[]` を含む stream key、先頭/末尾スペース付き key は拒否されます。
 
 ### Background image not found
 ```
