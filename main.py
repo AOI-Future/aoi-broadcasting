@@ -54,6 +54,7 @@ ARCHIVE_RETENTION_DAYS = _env_int("ARCHIVE_RETENTION_DAYS", 0, minimum=0)
 WAIT_NO_MUSIC = _env_int("WAIT_NO_MUSIC", 30, minimum=5)  # seconds to wait when no music found
 RESTART_DELAY = _env_int("RESTART_DELAY", 5, minimum=1)   # seconds before restarting after ffmpeg exits
 MAX_RESTART_DELAY = _env_int("MAX_RESTART_DELAY", 60, minimum=5)
+MAINTENANCE_INTERVAL = _env_int("MAINTENANCE_INTERVAL", 900, minimum=60)
 
 
 def _archive_destination(source: Path) -> Path:
@@ -103,6 +104,13 @@ def prune_archive() -> int:
     if removed:
         log.info("Pruned %d archived file(s)", removed)
     return removed
+
+
+def run_maintenance() -> tuple[int, int]:
+    """Run maintenance tasks and return counts for (archived, pruned)."""
+    archived = archive_old_files()
+    pruned = prune_archive()
+    return archived, pruned
 
 
 def collect_tracks() -> list[Path]:
@@ -250,12 +258,19 @@ def main():
     output_tee = build_outputs()
 
     restart_delay = RESTART_DELAY
+    next_maintenance_due = 0.0
     while True:
         try:
             # Phase 1: Maintenance
-            log.info("--- Maintenance phase ---")
-            archive_old_files()
-            prune_archive()
+            now = time.monotonic()
+            if now >= next_maintenance_due:
+                log.info("--- Maintenance phase ---")
+                archived, pruned = run_maintenance()
+                log.debug("Maintenance summary: archived=%d pruned=%d", archived, pruned)
+                next_maintenance_due = now + MAINTENANCE_INTERVAL
+            else:
+                remaining = int(next_maintenance_due - now)
+                log.debug("Skipping maintenance (%ds until next run)", remaining)
 
             # Phase 2: Collect and check tracks
             tracks = collect_tracks()
