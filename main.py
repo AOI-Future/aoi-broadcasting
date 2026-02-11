@@ -54,6 +54,7 @@ ARCHIVE_RETENTION_DAYS = _env_int("ARCHIVE_RETENTION_DAYS", 0, minimum=0)
 WAIT_NO_MUSIC = _env_int("WAIT_NO_MUSIC", 30, minimum=5)  # seconds to wait when no music found
 RESTART_DELAY = _env_int("RESTART_DELAY", 5, minimum=1)   # seconds before restarting after ffmpeg exits
 MAX_RESTART_DELAY = _env_int("MAX_RESTART_DELAY", 60, minimum=5)
+MAINTENANCE_INTERVAL = _env_int("MAINTENANCE_INTERVAL", 900, minimum=60)
 
 
 def _archive_destination(source: Path) -> Path:
@@ -105,6 +106,13 @@ def prune_archive() -> int:
     return removed
 
 
+def run_maintenance() -> tuple[int, int]:
+    """Run maintenance tasks and return counts for (archived, pruned)."""
+    archived = archive_old_files()
+    pruned = prune_archive()
+    return archived, pruned
+
+
 def collect_tracks() -> list[Path]:
     """Get all WAV files in music directory, shuffled."""
     tracks = []
@@ -136,25 +144,46 @@ def _valid_rtmp_target(url: str) -> bool:
     return bool(parsed.netloc)
 
 
+def _valid_stream_key(key: str) -> bool:
+    """Reject keys that can break tee syntax or contain control characters."""
+    if not key:
+        return False
+    if any(ch in key for ch in "|[]"):
+        return False
+    if any(ord(ch) < 32 for ch in key):
+        return False
+    return key == key.strip()
+
+
+def _build_target(base_url: str, stream_key: str, platform: str) -> str | None:
+    base_url = base_url.rstrip("/")
+    stream_key = stream_key.strip()
+    target = f"{base_url}/{stream_key}"
+
+    if not _valid_rtmp_target(target):
+        log.warning("Invalid %s URL; expected rtmp/rtmps scheme", platform)
+        return None
+    if not _valid_stream_key(stream_key):
+        log.warning("Invalid %s stream key format", platform)
+        return None
+    return target
+
+
 def build_outputs() -> str:
     """Build tee muxer output string for configured destinations."""
     outputs = []
 
     if YOUTUBE_URL and YOUTUBE_KEY:
-        yt = f"{YOUTUBE_URL}/{YOUTUBE_KEY}"
-        if _valid_rtmp_target(yt):
+        yt = _build_target(YOUTUBE_URL, YOUTUBE_KEY, "YouTube")
+        if yt:
             outputs.append(f"[f=flv]{yt}")
             log.info("YouTube output configured")
-        else:
-            log.warning("Invalid YouTube URL; expected rtmp/rtmps scheme")
 
     if KICK_URL and KICK_KEY:
-        kick = f"{KICK_URL}/{KICK_KEY}"
-        if _valid_rtmp_target(kick):
+        kick = _build_target(KICK_URL, KICK_KEY, "Kick")
+        if kick:
             outputs.append(f"[f=flv]{kick}")
             log.info("Kick output configured")
-        else:
-            log.warning("Invalid Kick URL; expected rtmp/rtmps scheme")
 
     if not outputs:
         log.error("No stream destinations configured. Set YOUTUBE_URL/KEY or KICK_URL/KEY.")
@@ -176,7 +205,9 @@ def _ensure_loop_video():
             return
         log.info("Background updated; regenerating loop video")
     log.info("Pre-encoding loop video from %s ...", BACKGROUND.name)
-    tmp = Path(tempfile.mkstemp(suffix=".flv")[1])
+    fd, tmp_path = tempfile.mkstemp(suffix=".flv")
+    os.close(fd)
+    tmp = Path(tmp_path)
     subprocess.run(
         [
             "ffmpeg", "-y",
@@ -250,12 +281,19 @@ def main():
     output_tee = build_outputs()
 
     restart_delay = RESTART_DELAY
+    next_maintenance_due = 0.0
     while True:
         try:
             # Phase 1: Maintenance
-            log.info("--- Maintenance phase ---")
-            archive_old_files()
-            prune_archive()
+            now = time.monotonic()
+            if now >= next_maintenance_due:
+                log.info("--- Maintenance phase ---")
+                archived, pruned = run_maintenance()
+                log.debug("Maintenance summary: archived=%d pruned=%d", archived, pruned)
+                next_maintenance_due = now + MAINTENANCE_INTERVAL
+            else:
+                remaining = int(next_maintenance_due - now)
+                log.debug("Skipping maintenance (%ds until next run)", remaining)
 
             # Phase 2: Collect and check tracks
             tracks = collect_tracks()

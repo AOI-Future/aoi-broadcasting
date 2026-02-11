@@ -35,7 +35,9 @@ docker logs -f aoi-broadcasting
 | `WAIT_NO_MUSIC` | Optional | Seconds to wait before rechecking when no music is found (default: 30) |
 | `RESTART_DELAY` | Optional | Base seconds before restarting after ffmpeg exits (default: 5) |
 | `MAX_RESTART_DELAY` | Optional | Max seconds for exponential backoff after ffmpeg failures (default: 60) |
+| `MAINTENANCE_INTERVAL` | Optional | Seconds between archive/prune scans to reduce I/O load (default: 900) |
 | `LOG_LEVEL` | Optional | Logging level (default: INFO) |
+| `STREAM_KEY` format | Note | Keys with leading/trailing spaces, control characters, or `|[]` are rejected for safety |
 
 At least one destination (YouTube or Kick) must be configured.
 
@@ -73,7 +75,7 @@ At least one destination (YouTube or Kick) must be configured.
 
 ### Streaming Cycle
 
-1. **Maintenance** — files older than 30 days are moved to `archive/`
+1. **Maintenance** — files older than 30 days are moved to `archive/`（デフォルトでは15分間隔で実行）
 2. **Collect** — all WAV files in `music/` are shuffled into a playlist
 3. **Stream** — ffmpeg streams the playlist with background image
 4. **Loop** — when playlist ends, cycle restarts with fresh shuffle
@@ -107,6 +109,7 @@ Place WAV files in `music/` directory. The streamer will detect them on the next
 No stream destinations configured. Set YOUTUBE_URL/KEY or KICK_URL/KEY.
 ```
 Check `.env` file — at least one YouTube or Kick destination is required.
+`|` や `[]` を含む stream key、先頭/末尾スペース付き key は拒否されます。
 
 ### Background image not found
 ```
