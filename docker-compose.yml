@@ -16,4 +16,5 @@ services:
     volumes:
       - ./music:/data/music
       - ./archive:/data/archive
+      - ./normalized:/data/normalized
       - ./assets:/app/assets:ro
