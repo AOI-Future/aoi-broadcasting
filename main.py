@@ -62,9 +62,6 @@ MAX_RESTART_DELAY = _env_int("MAX_RESTART_DELAY", 60, minimum=5)
 NORMALIZE_MAX_FILES_PER_CYCLE = _env_int("NORMALIZE_MAX_FILES_PER_CYCLE", 8, minimum=1)
 NORMALIZE_BOOTSTRAP_BATCH = _env_int("NORMALIZE_BOOTSTRAP_BATCH", 50, minimum=1)
 NORMALIZE_DURING_STREAM_INTERVAL = _env_int("NORMALIZE_DURING_STREAM_INTERVAL", 120, minimum=30)
-NORMALIZE_TARGET_I = os.environ.get("NORMALIZE_TARGET_I", "-16").strip() or "-16"
-NORMALIZE_TARGET_LRA = os.environ.get("NORMALIZE_TARGET_LRA", "11").strip() or "11"
-NORMALIZE_TARGET_TP = os.environ.get("NORMALIZE_TARGET_TP", "-1.5").strip() or "-1.5"
 NORMALIZE_NICE_LEVEL = _env_int("NORMALIZE_NICE_LEVEL", 10, minimum=0)
 FFMPEG_NORMALIZE_TIMEOUT = _env_int("FFMPEG_NORMALIZE_TIMEOUT", 1800, minimum=30)
 FFMPEG_LOOP_PREENCODE_TIMEOUT = _env_int("FFMPEG_LOOP_PREENCODE_TIMEOUT", 120, minimum=15)
@@ -427,6 +424,7 @@ def run_ffmpeg(playlist: Path, output_tee: str) -> int:
     ]
 
     log.info("Starting ffmpeg stream...")
+    proc: subprocess.Popen | None = None
     try:
         proc = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr)
         next_normalize_due = time.monotonic() + NORMALIZE_DURING_STREAM_INTERVAL
@@ -449,6 +447,16 @@ def run_ffmpeg(playlist: Path, output_tee: str) -> int:
     except Exception as e:
         log.error("ffmpeg error: %s", e)
         return 1
+    finally:
+        if proc and proc.poll() is None:
+            log.info("Stopping ffmpeg process...")
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                log.warning("ffmpeg did not stop gracefully; killing process")
+                proc.kill()
+                proc.wait(timeout=5)
 
 
 def main() -> None:
