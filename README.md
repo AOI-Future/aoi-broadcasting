@@ -42,8 +42,11 @@ docker logs -f aoi-broadcasting
 | `NORMALIZE_TARGET_LRA` | Optional | loudnormの目標Loudness Range (default: 11) |
 | `NORMALIZE_TARGET_TP` | Optional | loudnormの目標True Peak (dBTP, default: -1.5) |
 | `NORMALIZE_NICE_LEVEL` | Optional | 正規化ffmpegプロセスのnice値。大きいほど低優先度 (default: 10) |
+| `FFMPEG_NORMALIZE_TIMEOUT` | Optional | 1ファイル正規化ffmpegのタイムアウト秒 (default: 1800) |
+| `FFMPEG_LOOP_PREENCODE_TIMEOUT` | Optional | 背景ループ動画の事前エンコードタイムアウト秒 (default: 120) |
 | `LOG_LEVEL` | Optional | Logging level (default: INFO) |
 | `STREAM_KEY` format | Note | Keys with leading/trailing spaces, control characters, or `|[]` are rejected for safety |
+| `music/` filename safety | Note | 制御文字を含む危険なファイル名はスキップされます |
 
 At least one destination (YouTube or Kick) must be configured.
 
