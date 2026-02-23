@@ -16,6 +16,7 @@ jobs:
   analyze:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    continue-on-error: true
 
     strategy:
       fail-fast: false
@@ -36,3 +37,6 @@ jobs:
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
+
+# Note: CodeQL is treated as non-blocking to avoid failing CI in repositories
+# where GitHub Advanced Security is not enabled.
