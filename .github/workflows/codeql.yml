@@ -13,6 +13,9 @@ permissions:
 
 jobs:
   analyze:
+    # Enable by setting repository variable ENABLE_CODEQL=true
+    # This avoids feature-enablement API failures on repos without GHAS/Code Scanning.
+    if: ${{ vars.ENABLE_CODEQL == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     continue-on-error: true
@@ -27,17 +30,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+        uses: github/codeql-action/autobuild@v4
 
       - name: Perform CodeQL Analysis (no upload)
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
         with:
           upload: false
-
-# Note: upload is disabled so this workflow can run even when
-# GitHub Advanced Security / Code Scanning is not enabled for the repository.

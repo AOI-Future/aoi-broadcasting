@@ -124,7 +124,7 @@ aoi-broadcasting/
 公開運用に向けた最低限の運用は以下です。
 
 - CI (`.github/workflows/ci.yml`) で `py_compile` + `unittest` を必須化
-- CodeQL (`.github/workflows/codeql.yml`) による静的解析をPR/定期実行
+- CodeQL (`.github/workflows/codeql.yml`) による静的解析をPR/定期実行（`ENABLE_CODEQL=true` の場合）
 - Dependabot (`.github/dependabot.yml`) で Docker / GitHub Actions 更新を週次追従
 - 脆弱性対応手順は `SECURITY.md` を参照
 
