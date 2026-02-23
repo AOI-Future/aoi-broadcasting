@@ -1,0 +1,51 @@
+import os
+import tempfile
+import unittest
+from pathlib import Path
+
+import main
+
+
+class StreamerSecurityTests(unittest.TestCase):
+    def test_valid_stream_key_rejects_control_chars(self):
+        self.assertFalse(main._valid_stream_key("abc\n123"))
+        self.assertFalse(main._valid_stream_key(" bad"))
+        self.assertTrue(main._valid_stream_key("abc123-OK"))
+
+    def test_env_float_bounds_and_fallback(self):
+        old = os.environ.get("TEST_FLOAT")
+        try:
+            os.environ["TEST_FLOAT"] = "-999"
+            self.assertEqual(main._env_float("TEST_FLOAT", -16.0, -70.0, -5.0), -16.0)
+            os.environ["TEST_FLOAT"] = "-12.5"
+            self.assertEqual(main._env_float("TEST_FLOAT", -16.0, -70.0, -5.0), -12.5)
+            os.environ["TEST_FLOAT"] = "NaN?"
+            self.assertEqual(main._env_float("TEST_FLOAT", -16.0, -70.0, -5.0), -16.0)
+        finally:
+            if old is None:
+                os.environ.pop("TEST_FLOAT", None)
+            else:
+                os.environ["TEST_FLOAT"] = old
+
+    def test_source_tracks_skips_unsafe_and_symlink(self):
+        old_music = main.MUSIC_DIR
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            safe = root / "safe.wav"
+            unsafe = root / "unsafe\nname.wav"
+            safe.write_bytes(b"RIFF")
+            unsafe.write_bytes(b"RIFF")
+            (root / "link.wav").symlink_to(safe)
+
+            main.MUSIC_DIR = root
+            try:
+                tracks = main.source_tracks()
+            finally:
+                main.MUSIC_DIR = old_music
+
+        names = [p.name for p in tracks]
+        self.assertEqual(names, ["safe.wav"])
+
+
+if __name__ == "__main__":
+    unittest.main()

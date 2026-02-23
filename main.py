@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import os
+import re
 import random
 import shutil
 import subprocess
@@ -61,10 +62,38 @@ MAX_RESTART_DELAY = _env_int("MAX_RESTART_DELAY", 60, minimum=5)
 NORMALIZE_MAX_FILES_PER_CYCLE = _env_int("NORMALIZE_MAX_FILES_PER_CYCLE", 8, minimum=1)
 NORMALIZE_BOOTSTRAP_BATCH = _env_int("NORMALIZE_BOOTSTRAP_BATCH", 50, minimum=1)
 NORMALIZE_DURING_STREAM_INTERVAL = _env_int("NORMALIZE_DURING_STREAM_INTERVAL", 120, minimum=30)
-NORMALIZE_TARGET_I = os.environ.get("NORMALIZE_TARGET_I", "-16").strip() or "-16"
-NORMALIZE_TARGET_LRA = os.environ.get("NORMALIZE_TARGET_LRA", "11").strip() or "11"
-NORMALIZE_TARGET_TP = os.environ.get("NORMALIZE_TARGET_TP", "-1.5").strip() or "-1.5"
 NORMALIZE_NICE_LEVEL = _env_int("NORMALIZE_NICE_LEVEL", 10, minimum=0)
+FFMPEG_NORMALIZE_TIMEOUT = _env_int("FFMPEG_NORMALIZE_TIMEOUT", 1800, minimum=30)
+FFMPEG_LOOP_PREENCODE_TIMEOUT = _env_int("FFMPEG_LOOP_PREENCODE_TIMEOUT", 120, minimum=15)
+
+_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _env_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        log.warning("Invalid %s=%r, using default %s", name, raw, default)
+        return default
+    if value < minimum or value > maximum:
+        log.warning(
+            "Invalid %s=%s, expected %.2f..%.2f; using default %s",
+            name,
+            raw,
+            minimum,
+            maximum,
+            default,
+        )
+        return default
+    return value
+
+
+NORMALIZE_TARGET_I_VALUE = _env_float("NORMALIZE_TARGET_I", -16.0, -70.0, -5.0)
+NORMALIZE_TARGET_LRA_VALUE = _env_float("NORMALIZE_TARGET_LRA", 11.0, 1.0, 50.0)
+NORMALIZE_TARGET_TP_VALUE = _env_float("NORMALIZE_TARGET_TP", -1.5, -9.0, 0.0)
 
 
 def _archive_destination(source: Path) -> Path:
@@ -86,7 +115,15 @@ def _normalized_path(track: Path) -> Path:
 
 
 def source_tracks() -> list[Path]:
-    return sorted(p for p in MUSIC_DIR.glob("*.wav") if p.is_file() and not p.is_symlink())
+    tracks: list[Path] = []
+    for p in sorted(MUSIC_DIR.glob("*.wav")):
+        if not p.is_file() or p.is_symlink():
+            continue
+        if _CONTROL_CHAR_PATTERN.search(p.name):
+            log.warning("Skipping unsafe filename containing control chars: %r", p.name)
+            continue
+        tracks.append(p)
+    return tracks
 
 
 def stream_ready_tracks(tracks: list[Path]) -> list[Path]:
@@ -155,9 +192,9 @@ def _normalize_track(track: Path, normalized_path: Path) -> bool:
     tmp = Path(tmp_path)
 
     filter_graph = (
-        f"loudnorm=I={NORMALIZE_TARGET_I}:"
-        f"LRA={NORMALIZE_TARGET_LRA}:"
-        f"TP={NORMALIZE_TARGET_TP}:"
+        f"loudnorm=I={NORMALIZE_TARGET_I_VALUE}:"
+        f"LRA={NORMALIZE_TARGET_LRA_VALUE}:"
+        f"TP={NORMALIZE_TARGET_TP_VALUE}:"
         "dual_mono=true"
     )
     cmd = [
@@ -183,13 +220,23 @@ def _normalize_track(track: Path, normalized_path: Path) -> bool:
         str(tmp),
     ]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, preexec_fn=lambda: os.nice(NORMALIZE_NICE_LEVEL))
+        subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            timeout=FFMPEG_NORMALIZE_TIMEOUT,
+            preexec_fn=lambda: os.nice(NORMALIZE_NICE_LEVEL),
+        )
         tmp.replace(normalized_path)
         log.info("Normalized: %s -> %s", track.name, normalized_path.name)
         return True
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
         log.warning("Failed to normalize %s: %s", track.name, stderr.strip())
+        tmp.unlink(missing_ok=True)
+        return False
+    except subprocess.TimeoutExpired:
+        log.warning("Normalization timed out for %s after %ds", track.name, FFMPEG_NORMALIZE_TIMEOUT)
         tmp.unlink(missing_ok=True)
         return False
 
@@ -293,42 +340,53 @@ def _ensure_loop_video() -> None:
     fd, tmp_path = tempfile.mkstemp(suffix=".flv")
     os.close(fd)
     tmp = Path(tmp_path)
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-loop",
-            "1",
-            "-i",
-            str(BACKGROUND),
-            "-c:v",
-            "libx264",
-            "-tune",
-            "stillimage",
-            "-preset",
-            "ultrafast",
-            "-b:v",
-            "500k",
-            "-pix_fmt",
-            "yuv420p",
-            "-vf",
-            "scale=1280:720",
-            "-r",
-            "5",
-            "-g",
-            "10",
-            "-t",
-            "10",
-            "-an",
-            "-f",
-            "flv",
-            str(tmp),
-        ],
-        check=True,
-        capture_output=True,
-    )
-    tmp.replace(LOOP_VIDEO)
-    log.info("Loop video ready: %s (%.1f MB)", LOOP_VIDEO, LOOP_VIDEO.stat().st_size / 1e6)
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loop",
+                "1",
+                "-i",
+                str(BACKGROUND),
+                "-c:v",
+                "libx264",
+                "-tune",
+                "stillimage",
+                "-preset",
+                "ultrafast",
+                "-b:v",
+                "500k",
+                "-pix_fmt",
+                "yuv420p",
+                "-vf",
+                "scale=1280:720",
+                "-r",
+                "5",
+                "-g",
+                "10",
+                "-t",
+                "10",
+                "-an",
+                "-f",
+                "flv",
+                str(tmp),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=FFMPEG_LOOP_PREENCODE_TIMEOUT,
+        )
+        tmp.replace(LOOP_VIDEO)
+        log.info("Loop video ready: %s (%.1f MB)", LOOP_VIDEO, LOOP_VIDEO.stat().st_size / 1e6)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+        tmp.unlink(missing_ok=True)
+        log.error("Failed to pre-encode loop video: %s", stderr.strip())
+        raise
+    except subprocess.TimeoutExpired:
+        tmp.unlink(missing_ok=True)
+        log.error("Loop video pre-encode timed out after %ds", FFMPEG_LOOP_PREENCODE_TIMEOUT)
+        raise
 
 
 def run_ffmpeg(playlist: Path, output_tee: str) -> int:
@@ -366,6 +424,7 @@ def run_ffmpeg(playlist: Path, output_tee: str) -> int:
     ]
 
     log.info("Starting ffmpeg stream...")
+    proc: subprocess.Popen | None = None
     try:
         proc = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr)
         next_normalize_due = time.monotonic() + NORMALIZE_DURING_STREAM_INTERVAL
@@ -388,6 +447,16 @@ def run_ffmpeg(playlist: Path, output_tee: str) -> int:
     except Exception as e:
         log.error("ffmpeg error: %s", e)
         return 1
+    finally:
+        if proc and proc.poll() is None:
+            log.info("Stopping ffmpeg process...")
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                log.warning("ffmpeg did not stop gracefully; killing process")
+                proc.kill()
+                proc.wait(timeout=5)
 
 
 def main() -> None:
