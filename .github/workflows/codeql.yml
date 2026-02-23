@@ -10,7 +10,6 @@ on:
 permissions:
   actions: read
   contents: read
-  security-events: write
 
 jobs:
   analyze:
@@ -35,8 +34,10 @@ jobs:
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3
 
-      - name: Perform CodeQL Analysis
+      - name: Perform CodeQL Analysis (no upload)
         uses: github/codeql-action/analyze@v3
+        with:
+          upload: false
 
-# Note: CodeQL is treated as non-blocking to avoid failing CI in repositories
-# where GitHub Advanced Security is not enabled.
+# Note: upload is disabled so this workflow can run even when
+# GitHub Advanced Security / Code Scanning is not enabled for the repository.
