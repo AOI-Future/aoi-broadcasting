@@ -2,6 +2,17 @@
 
 Headless streaming server — static background image + WAV playlist to YouTube/Kick via ffmpeg.
 
+## Customization Points
+
+Before running, adjust these to match your environment:
+
+| File | Line | What to change |
+|------|------|----------------|
+| `docker-compose.yml` | `volumes: - ./music:/data/music` | Change `./music` to your WAV files directory (relative or absolute path) |
+| `.env` | `YOUTUBE_URL` / `YOUTUBE_KEY` | Your YouTube Live RTMP ingest URL and stream key |
+| `.env` | `KICK_URL` / `KICK_KEY` | Your Kick RTMP ingest URL and stream key (optional) |
+| `assets/` | `background.jpg` | Replace with your own background image (JPG or PNG) |
+
 ## Quick Start
 
 ```bash

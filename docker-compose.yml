@@ -14,6 +14,8 @@ services:
     env_file:
       - .env
     volumes:
+      # CUSTOMIZE: Change this to your WAV files directory.
+      # Use a relative path (./music) or an absolute path (/path/to/your/music).
       - ./music:/data/music
       - ./archive:/data/archive
       - ./normalized:/data/normalized

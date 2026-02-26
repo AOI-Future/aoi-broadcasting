@@ -63,6 +63,7 @@ NORMALIZE_MAX_FILES_PER_CYCLE = _env_int("NORMALIZE_MAX_FILES_PER_CYCLE", 8, min
 NORMALIZE_BOOTSTRAP_BATCH = _env_int("NORMALIZE_BOOTSTRAP_BATCH", 50, minimum=1)
 NORMALIZE_DURING_STREAM_INTERVAL = _env_int("NORMALIZE_DURING_STREAM_INTERVAL", 120, minimum=30)
 NORMALIZE_NICE_LEVEL = _env_int("NORMALIZE_NICE_LEVEL", 10, minimum=0)
+PLAYLIST_REPEAT_COUNT = _env_int("PLAYLIST_REPEAT_COUNT", 10, minimum=1)
 FFMPEG_NORMALIZE_TIMEOUT = _env_int("FFMPEG_NORMALIZE_TIMEOUT", 1800, minimum=30)
 FFMPEG_LOOP_PREENCODE_TIMEOUT = _env_int("FFMPEG_LOOP_PREENCODE_TIMEOUT", 120, minimum=15)
 
@@ -264,10 +265,15 @@ def run_idle_maintenance() -> tuple[int, int, int]:
 def build_playlist(tracks: list[Path], tmpdir: str) -> Path:
     playlist = Path(tmpdir) / "playlist.txt"
     with open(playlist, "w", encoding="utf-8") as f:
-        for track in tracks:
-            safe = str(track).replace("'", "'\\''")
-            f.write(f"file '{safe}'\n")
-    log.info("Playlist: %d tracks", len(tracks))
+        for i in range(PLAYLIST_REPEAT_COUNT):
+            cycle = tracks.copy()
+            if i > 0:
+                random.shuffle(cycle)
+            for track in cycle:
+                safe = str(track).replace("'", "'\\''")
+                f.write(f"file '{safe}'\n")
+    total = len(tracks) * PLAYLIST_REPEAT_COUNT
+    log.info("Playlist: %d tracks (%d unique × %d repeat cycles)", total, len(tracks), PLAYLIST_REPEAT_COUNT)
     return playlist
 
 
