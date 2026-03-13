@@ -47,5 +47,11 @@ class StreamerSecurityTests(unittest.TestCase):
         self.assertEqual(names, ["safe.wav"])
 
 
+    def test_archive_disabled_by_default(self):
+        self.assertFalse(main.ARCHIVE_ENABLED)
+        self.assertEqual(main.archive_old_files(), 0)
+        self.assertEqual(main.prune_archive(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

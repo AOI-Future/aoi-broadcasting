@@ -10,7 +10,7 @@ WORKDIR /app
 COPY main.py .
 
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin streamer && \
-    mkdir -p /data/music /data/archive /app/assets && \
+    mkdir -p /data/music /app/assets && \
     chown -R streamer:streamer /data /app
 
 USER streamer

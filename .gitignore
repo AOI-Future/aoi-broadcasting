@@ -1,9 +1,11 @@
-.env
+.env.*
+!.env.example
 *.wav
 archive/
 normalized/
+music/
 __pycache__/
 *.pyc
-ops/.last-log-ts
+ops/.last-log-ts*
 ops/.watchdog-*
-ops/watchdog.log
+ops/watchdog-*.log

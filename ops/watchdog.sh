@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
-# aoi-broadcasting (Ch1) stream watchdog
-# cron: */5 * * * * /home/shugo/services/aoi-broadcasting/ops/watchdog.sh >> /home/shugo/services/aoi-broadcasting/ops/watchdog.log 2>&1
+# aoi-broadcasting stream watchdog (multi-channel)
+# Usage: watchdog.sh <channel>  (e.g., watchdog.sh ch1)
+# cron:
+#   */5 * * * * /home/shugo/services/aoi-broadcasting/ops/watchdog.sh ch1 >> /home/shugo/services/aoi-broadcasting/ops/watchdog-ch1.log 2>&1
+#   */5 * * * * /home/shugo/services/aoi-broadcasting/ops/watchdog.sh ch2 >> /home/shugo/services/aoi-broadcasting/ops/watchdog-ch2.log 2>&1
 
 set -uo pipefail
 
-CONTAINER="aoi-broadcasting"
+CHANNEL="${1:?Usage: watchdog.sh <channel> (e.g., ch1, ch2)}"
+CONTAINER="aoi-broadcasting-${CHANNEL}"
 COMPOSE_DIR="$HOME/services/aoi-broadcasting"
+COMPOSE_SERVICE="$CHANNEL"
 DISCORD_WEBHOOK_URL="$(grep DISCORD_WEBHOOK_URL "$HOME/clawd/.env" 2>/dev/null | cut -d= -f2-)"
-LOG_PREFIX="[broadcasting-1]"
+LOG_PREFIX="[broadcasting-${CHANNEL}]"
 YT_DLP="/home/linuxbrew/.linuxbrew/bin/yt-dlp"
 
-YOUTUBE_WATCH_URL="$(grep YOUTUBE_WATCH_URL "$COMPOSE_DIR/.env" 2>/dev/null | cut -d= -f2-)"
-KICK_CHANNEL_URL="$(grep KICK_CHANNEL_URL "$COMPOSE_DIR/.env" 2>/dev/null | cut -d= -f2-)"
+ENV_FILE="$COMPOSE_DIR/.env.${CHANNEL}"
+YOUTUBE_WATCH_URL="$(grep YOUTUBE_WATCH_URL "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
+KICK_CHANNEL_URL="$(grep KICK_CHANNEL_URL "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
 
-LV1_FAIL_STATE="$COMPOSE_DIR/ops/.watchdog-fail-lv1"
-LV2_FAIL_STATE="$COMPOSE_DIR/ops/.watchdog-fail-lv2"
-LV2_RESTART_COUNT_FILE="$COMPOSE_DIR/ops/.watchdog-lv2-restarts"
-COOLDOWN_FILE="$COMPOSE_DIR/ops/.watchdog-cooldown"
-LOG_TS_FILE="$COMPOSE_DIR/ops/.last-log-ts"
-LV2_INCONCLUSIVE_STATE="$COMPOSE_DIR/ops/.watchdog-lv2-inconclusive"
+LV1_FAIL_STATE="$COMPOSE_DIR/ops/.watchdog-fail-lv1-${CHANNEL}"
+LV2_FAIL_STATE="$COMPOSE_DIR/ops/.watchdog-fail-lv2-${CHANNEL}"
+LV2_RESTART_COUNT_FILE="$COMPOSE_DIR/ops/.watchdog-lv2-restarts-${CHANNEL}"
+COOLDOWN_FILE="$COMPOSE_DIR/ops/.watchdog-cooldown-${CHANNEL}"
+LOG_TS_FILE="$COMPOSE_DIR/ops/.last-log-ts-${CHANNEL}"
+LV2_INCONCLUSIVE_STATE="$COMPOSE_DIR/ops/.watchdog-lv2-inconclusive-${CHANNEL}"
 LOG_STALE_SECS=600  # 10分
 COOLDOWN_SECS=900   # 再起動後15分はLv2チェック抑制
 LV2_MAX_RESTARTS=2  # Lv2起因の再起動は最大2回/日。超過後は通知のみ
@@ -85,7 +91,7 @@ last_frame() {
 do_restart() {
     local reason="$1"
     log "Restarting ($reason)..."
-    cd "$COMPOSE_DIR" && docker compose restart streamer >> "$COMPOSE_DIR/ops/watchdog.log" 2>&1
+    cd "$COMPOSE_DIR" && docker compose restart $COMPOSE_SERVICE >> "$COMPOSE_DIR/ops/watchdog-${CHANNEL}.log" 2>&1
     rm -f "$LOG_TS_FILE"
     start_cooldown
 }
@@ -102,14 +108,14 @@ should_notify_inconclusive() {
     [ $((now - last_ts)) -ge 21600 ]
 }
 
-# Migrate old fail state file
-rm -f "$COMPOSE_DIR/ops/.watchdog-fail"
+# Migrate old fail state files
+rm -f "$COMPOSE_DIR/ops/.watchdog-fail" "$COMPOSE_DIR/ops/.watchdog-fail-${CHANNEL}"
 
 # ─── 1. コンテナ起動確認 ───
 STATUS=$(docker inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo "missing")
 if [ "$STATUS" != "running" ]; then
     log "Container is $STATUS. Starting..."
-    cd "$COMPOSE_DIR" && docker compose up -d >> "$COMPOSE_DIR/ops/watchdog.log" 2>&1
+    cd "$COMPOSE_DIR" && docker compose up -d "$COMPOSE_SERVICE" >> "$COMPOSE_DIR/ops/watchdog-${CHANNEL}.log" 2>&1
     NEW_STATUS=$(docker inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo "missing")
     if [ "$NEW_STATUS" = "running" ]; then
         notify "♻️ **NICTIA Radio Ch1**: コンテナ停止を検知→起動しました
@@ -153,7 +159,7 @@ else
 📋 検知内容: ffmpegログが約${ELAPSED_MIN}分間 無更新（閾値: ${LOG_STALE_SECS}秒×2サイクル）
 🔌 RTMP接続: ${RTMP}（TCP keepaliveで維持されていても内部ハングの可能性あり）
 🎞️ 最終フレーム: ${FRAME}
-⚙️ 対応: docker compose restart streamer"
+⚙️ 対応: docker compose restart $COMPOSE_SERVICE"
     do_restart "ffmpeg log stale"
     reset_fail "$LV1_FAIL_STATE"
     reset_fail "$LV2_FAIL_STATE"
@@ -302,7 +308,7 @@ if [ "$LV2_FAIL" -gt 0 ]; then
 📋 検知内容: ${LV2_DETAILS}
 🔌 RTMP接続: ${RTMP}
 🎞️ 最終フレーム: ${FRAME}
-⚙️ 対応: docker compose restart streamer"
+⚙️ 対応: docker compose restart $COMPOSE_SERVICE"
         do_restart "viewer-side unreachable"
         reset_fail "$LV2_FAIL_STATE"
         clear_inconclusive_marker

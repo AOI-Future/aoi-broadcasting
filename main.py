@@ -54,6 +54,7 @@ def _env_int(name: str, default: int, minimum: int | None = None) -> int:
     return value
 
 
+ARCHIVE_ENABLED = os.environ.get("ARCHIVE_ENABLED", "false").lower() in ("true", "1", "yes")
 ARCHIVE_DAYS = _env_int("ARCHIVE_DAYS", 30, minimum=1)
 ARCHIVE_RETENTION_DAYS = _env_int("ARCHIVE_RETENTION_DAYS", 0, minimum=0)
 WAIT_NO_MUSIC = _env_int("WAIT_NO_MUSIC", 30, minimum=5)
@@ -112,6 +113,8 @@ def stream_ready_tracks(tracks: list[Path]) -> list[Path]:
 
 
 def archive_old_files() -> int:
+    if not ARCHIVE_ENABLED:
+        return 0
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     cutoff = datetime.now() - timedelta(days=ARCHIVE_DAYS)
     moved = 0
@@ -139,7 +142,7 @@ def archive_old_files() -> int:
 
 
 def prune_archive() -> int:
-    if ARCHIVE_RETENTION_DAYS <= 0:
+    if not ARCHIVE_ENABLED or ARCHIVE_RETENTION_DAYS <= 0:
         return 0
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     cutoff = datetime.now() - timedelta(days=ARCHIVE_RETENTION_DAYS)
