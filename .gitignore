@@ -1,5 +1,9 @@
 .env
 *.wav
 archive/
+normalized/
 __pycache__/
 *.pyc
+ops/.last-log-ts
+ops/.watchdog-*
+ops/watchdog.log

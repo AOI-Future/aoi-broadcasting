@@ -12,20 +12,20 @@ class StreamerSecurityTests(unittest.TestCase):
         self.assertFalse(main._valid_stream_key(" bad"))
         self.assertTrue(main._valid_stream_key("abc123-OK"))
 
-    def test_env_float_bounds_and_fallback(self):
-        old = os.environ.get("TEST_FLOAT")
+    def test_env_int_bounds_and_fallback(self):
+        old = os.environ.get("TEST_INT")
         try:
-            os.environ["TEST_FLOAT"] = "-999"
-            self.assertEqual(main._env_float("TEST_FLOAT", -16.0, -70.0, -5.0), -16.0)
-            os.environ["TEST_FLOAT"] = "-12.5"
-            self.assertEqual(main._env_float("TEST_FLOAT", -16.0, -70.0, -5.0), -12.5)
-            os.environ["TEST_FLOAT"] = "NaN?"
-            self.assertEqual(main._env_float("TEST_FLOAT", -16.0, -70.0, -5.0), -16.0)
+            os.environ["TEST_INT"] = "0"
+            self.assertEqual(main._env_int("TEST_INT", 10, minimum=1), 1)
+            os.environ["TEST_INT"] = "5"
+            self.assertEqual(main._env_int("TEST_INT", 10, minimum=1), 5)
+            os.environ["TEST_INT"] = "NaN?"
+            self.assertEqual(main._env_int("TEST_INT", 10, minimum=1), 10)
         finally:
             if old is None:
-                os.environ.pop("TEST_FLOAT", None)
+                os.environ.pop("TEST_INT", None)
             else:
-                os.environ["TEST_FLOAT"] = old
+                os.environ["TEST_INT"] = old
 
     def test_source_tracks_skips_unsafe_and_symlink(self):
         old_music = main.MUSIC_DIR

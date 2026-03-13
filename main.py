@@ -62,39 +62,16 @@ MAX_RESTART_DELAY = _env_int("MAX_RESTART_DELAY", 60, minimum=5)
 NORMALIZE_MAX_FILES_PER_CYCLE = _env_int("NORMALIZE_MAX_FILES_PER_CYCLE", 8, minimum=1)
 NORMALIZE_BOOTSTRAP_BATCH = _env_int("NORMALIZE_BOOTSTRAP_BATCH", 50, minimum=1)
 NORMALIZE_DURING_STREAM_INTERVAL = _env_int("NORMALIZE_DURING_STREAM_INTERVAL", 120, minimum=30)
+NORMALIZE_TARGET_I = os.environ.get("NORMALIZE_TARGET_I", "-16").strip() or "-16"
+NORMALIZE_TARGET_LRA = os.environ.get("NORMALIZE_TARGET_LRA", "11").strip() or "11"
+NORMALIZE_TARGET_TP = os.environ.get("NORMALIZE_TARGET_TP", "-1.5").strip() or "-1.5"
 NORMALIZE_NICE_LEVEL = _env_int("NORMALIZE_NICE_LEVEL", 10, minimum=0)
 PLAYLIST_REPEAT_COUNT = _env_int("PLAYLIST_REPEAT_COUNT", 10, minimum=1)
+STREAM_HEARTBEAT_INTERVAL = _env_int("STREAM_HEARTBEAT_INTERVAL", 120, minimum=30)
 FFMPEG_NORMALIZE_TIMEOUT = _env_int("FFMPEG_NORMALIZE_TIMEOUT", 1800, minimum=30)
 FFMPEG_LOOP_PREENCODE_TIMEOUT = _env_int("FFMPEG_LOOP_PREENCODE_TIMEOUT", 120, minimum=15)
 
 _CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
-
-
-def _env_float(name: str, default: float, minimum: float, maximum: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        log.warning("Invalid %s=%r, using default %s", name, raw, default)
-        return default
-    if value < minimum or value > maximum:
-        log.warning(
-            "Invalid %s=%s, expected %.2f..%.2f; using default %s",
-            name,
-            raw,
-            minimum,
-            maximum,
-            default,
-        )
-        return default
-    return value
-
-
-NORMALIZE_TARGET_I_VALUE = _env_float("NORMALIZE_TARGET_I", -16.0, -70.0, -5.0)
-NORMALIZE_TARGET_LRA_VALUE = _env_float("NORMALIZE_TARGET_LRA", 11.0, 1.0, 50.0)
-NORMALIZE_TARGET_TP_VALUE = _env_float("NORMALIZE_TARGET_TP", -1.5, -9.0, 0.0)
 
 
 def _archive_destination(source: Path) -> Path:
@@ -142,9 +119,16 @@ def archive_old_files() -> int:
         mtime = datetime.fromtimestamp(f.stat().st_mtime)
         if mtime < cutoff:
             dest = _archive_destination(f)
-            shutil.move(str(f), str(dest))
-            log.info("Archived: %s -> %s (mtime: %s)", f.name, dest.name, mtime.isoformat())
-            moved += 1
+            try:
+                shutil.copy2(str(f), str(dest))
+                try:
+                    f.unlink()
+                except PermissionError:
+                    log.debug("Cannot remove source (read-only mount): %s", f.name)
+                log.info("Archived: %s -> %s (mtime: %s)", f.name, dest.name, mtime.isoformat())
+                moved += 1
+            except OSError as e:
+                log.warning("Archive skipped %s: %s", f.name, e)
     if moved:
         log.info("Archived %d file(s)", moved)
     return moved
@@ -193,9 +177,9 @@ def _normalize_track(track: Path, normalized_path: Path) -> bool:
     tmp = Path(tmp_path)
 
     filter_graph = (
-        f"loudnorm=I={NORMALIZE_TARGET_I_VALUE}:"
-        f"LRA={NORMALIZE_TARGET_LRA_VALUE}:"
-        f"TP={NORMALIZE_TARGET_TP_VALUE}:"
+        f"loudnorm=I={NORMALIZE_TARGET_I}:"
+        f"LRA={NORMALIZE_TARGET_LRA}:"
+        f"TP={NORMALIZE_TARGET_TP}:"
         "dual_mono=true"
     )
     cmd = [
@@ -365,6 +349,8 @@ def _ensure_loop_video() -> None:
                 "500k",
                 "-pix_fmt",
                 "yuv420p",
+                "-color_range",
+                "tv",
                 "-vf",
                 "scale=1280:720",
                 "-r",
@@ -434,6 +420,8 @@ def run_ffmpeg(playlist: Path, output_tee: str) -> int:
     try:
         proc = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr)
         next_normalize_due = time.monotonic() + NORMALIZE_DURING_STREAM_INTERVAL
+        next_heartbeat = time.monotonic() + STREAM_HEARTBEAT_INTERVAL
+        stream_start = time.monotonic()
 
         while True:
             rc = proc.poll()
@@ -441,6 +429,10 @@ def run_ffmpeg(playlist: Path, output_tee: str) -> int:
                 return rc
 
             now = time.monotonic()
+            if now >= next_heartbeat:
+                elapsed = int(now - stream_start)
+                log.info("Stream heartbeat: ffmpeg running (%dm%02ds)", elapsed // 60, elapsed % 60)
+                next_heartbeat = now + STREAM_HEARTBEAT_INTERVAL
             if now >= next_normalize_due:
                 normalized = normalize_tracks(max_files=NORMALIZE_MAX_FILES_PER_CYCLE)
                 if normalized:
