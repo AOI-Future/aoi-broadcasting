@@ -121,14 +121,18 @@ def archive_old_files() -> int:
             dest = _archive_destination(f)
             try:
                 shutil.copy2(str(f), str(dest))
-                try:
-                    f.unlink()
-                except PermissionError:
-                    log.debug("Cannot remove source (read-only mount): %s", f.name)
+            except OSError as e:
+                log.warning("Archive copy failed %s: %s", f.name, e)
+                continue
+            try:
+                f.unlink()
                 log.info("Archived: %s -> %s (mtime: %s)", f.name, dest.name, mtime.isoformat())
                 moved += 1
-            except OSError as e:
-                log.warning("Archive skipped %s: %s", f.name, e)
+            except PermissionError:
+                # Source is on a read-only mount; remove the copy to avoid
+                # duplicating it every cycle.
+                dest.unlink(missing_ok=True)
+                log.debug("Cannot archive %s (source not deletable, skipping)", f.name)
     if moved:
         log.info("Archived %d file(s)", moved)
     return moved
