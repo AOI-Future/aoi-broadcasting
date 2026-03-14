@@ -1,0 +1,43 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 3 * * 1'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  analyze:
+    # Enable by setting repository variable ENABLE_CODEQL=true
+    # This avoids feature-enablement API failures on repos without GHAS/Code Scanning.
+    if: ${{ vars.ENABLE_CODEQL == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4
+
+      - name: Perform CodeQL Analysis (no upload)
+        uses: github/codeql-action/analyze@v4
+        with:
+          upload: false
