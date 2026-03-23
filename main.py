@@ -68,6 +68,9 @@ NORMALIZE_TARGET_LRA = os.environ.get("NORMALIZE_TARGET_LRA", "11").strip() or "
 NORMALIZE_TARGET_TP = os.environ.get("NORMALIZE_TARGET_TP", "-1.5").strip() or "-1.5"
 NORMALIZE_NICE_LEVEL = _env_int("NORMALIZE_NICE_LEVEL", 10, minimum=0)
 PLAYLIST_REPEAT_COUNT = _env_int("PLAYLIST_REPEAT_COUNT", 10, minimum=1)
+PLAYLIST_CHUNK_SIZE = _env_int("PLAYLIST_CHUNK_SIZE", 5, minimum=0)
+MUSIC_CHANGE_CHECK_INTERVAL = _env_int("MUSIC_CHANGE_CHECK_INTERVAL", 60, minimum=10)
+MUSIC_CHANGE_DEBOUNCE = _env_int("MUSIC_CHANGE_DEBOUNCE", 60, minimum=0)
 STREAM_HEARTBEAT_INTERVAL = _env_int("STREAM_HEARTBEAT_INTERVAL", 120, minimum=30)
 FFMPEG_NORMALIZE_TIMEOUT = _env_int("FFMPEG_NORMALIZE_TIMEOUT", 1800, minimum=30)
 FFMPEG_LOOP_PREENCODE_TIMEOUT = _env_int("FFMPEG_LOOP_PREENCODE_TIMEOUT", 120, minimum=15)
@@ -91,6 +94,21 @@ def _normalization_signature(track: Path) -> str:
 
 def _normalized_path(track: Path) -> Path:
     return NORMALIZED_DIR / f"{track.stem}.{_normalization_signature(track)}.wav"
+
+
+def _music_dir_fingerprint() -> str:
+    """Return a hash summarising the current state of the music directory."""
+    entries: list[str] = []
+    for p in sorted(MUSIC_DIR.glob("*.wav")):
+        if not p.is_file() or p.is_symlink():
+            continue
+        try:
+            st = p.stat()
+            entries.append(f"{p.name}:{st.st_size}:{st.st_mtime_ns}")
+        except OSError:
+            continue
+    payload = "\n".join(entries).encode("utf-8")
+    return hashlib.sha1(payload).hexdigest()
 
 
 def source_tracks() -> list[Path]:
@@ -253,18 +271,19 @@ def run_idle_maintenance() -> tuple[int, int, int]:
     return archived, pruned, removed_cache
 
 
-def build_playlist(tracks: list[Path], tmpdir: str) -> Path:
+def build_playlist(tracks: list[Path], tmpdir: str, repeat: int | None = None) -> Path:
     playlist = Path(tmpdir) / "playlist.txt"
+    repeat_count = repeat if repeat is not None else PLAYLIST_REPEAT_COUNT
     with open(playlist, "w", encoding="utf-8") as f:
-        for i in range(PLAYLIST_REPEAT_COUNT):
+        for i in range(repeat_count):
             cycle = tracks.copy()
             if i > 0:
                 random.shuffle(cycle)
             for track in cycle:
                 safe = str(track).replace("'", "'\\''")
                 f.write(f"file '{safe}'\n")
-    total = len(tracks) * PLAYLIST_REPEAT_COUNT
-    log.info("Playlist: %d tracks (%d unique × %d repeat cycles)", total, len(tracks), PLAYLIST_REPEAT_COUNT)
+    total = len(tracks) * repeat_count
+    log.info("Playlist: %d tracks (%d unique × %d repeat cycles)", total, len(tracks), repeat_count)
     return playlist
 
 
@@ -388,7 +407,17 @@ def _ensure_loop_video() -> None:
         raise
 
 
-def run_ffmpeg(playlist: Path, output_tee: str) -> int:
+def run_ffmpeg(
+    playlist: Path,
+    output_tee: str,
+    fingerprint: str | None = None,
+) -> tuple[int, bool]:
+    """Run ffmpeg for one playlist chunk.
+
+    Returns ``(return_code, music_changed)`` where *music_changed* is
+    ``True`` when a directory change was detected and ffmpeg was stopped
+    early so the caller can rebuild the playlist.
+    """
     _ensure_loop_video()
 
     cmd = [
@@ -424,16 +453,20 @@ def run_ffmpeg(playlist: Path, output_tee: str) -> int:
 
     log.info("Starting ffmpeg stream...")
     proc: subprocess.Popen | None = None
+    music_changed = False
     try:
         proc = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr)
         next_normalize_due = time.monotonic() + NORMALIZE_DURING_STREAM_INTERVAL
         next_heartbeat = time.monotonic() + STREAM_HEARTBEAT_INTERVAL
+        next_music_check = time.monotonic() + MUSIC_CHANGE_CHECK_INTERVAL
         stream_start = time.monotonic()
+        pending_change_fp: str | None = None
+        pending_change_time: float = 0.0
 
         while True:
             rc = proc.poll()
             if rc is not None:
-                return rc
+                return rc, music_changed
 
             now = time.monotonic()
             if now >= next_heartbeat:
@@ -445,13 +478,39 @@ def run_ffmpeg(playlist: Path, output_tee: str) -> int:
                 if normalized:
                     log.info("In-stream maintenance normalized %d track(s)", normalized)
                 next_normalize_due = now + NORMALIZE_DURING_STREAM_INTERVAL
+
+            # Music directory change detection
+            if fingerprint is not None and now >= next_music_check:
+                new_fp = _music_dir_fingerprint()
+                if new_fp != fingerprint and pending_change_fp is None:
+                    log.info("Music directory change detected, waiting %ds to confirm...", MUSIC_CHANGE_DEBOUNCE)
+                    pending_change_fp = new_fp
+                    pending_change_time = now
+                elif pending_change_fp is not None:
+                    if now - pending_change_time >= MUSIC_CHANGE_DEBOUNCE:
+                        stable_fp = _music_dir_fingerprint()
+                        if stable_fp != fingerprint:
+                            log.info("Music directory changed (confirmed), stopping current chunk")
+                            music_changed = True
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=10)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                                proc.wait(timeout=5)
+                            return 0, True
+                        else:
+                            log.info("Music directory change reverted, resuming")
+                            pending_change_fp = None
+                next_music_check = now + MUSIC_CHANGE_CHECK_INTERVAL
+
             time.sleep(1)
     except KeyboardInterrupt:
         log.info("Stream interrupted by user")
         raise
     except Exception as e:
         log.error("ffmpeg error: %s", e)
-        return 1
+        return 1, music_changed
     finally:
         if proc and proc.poll() is None:
             log.info("Stopping ffmpeg process...")
@@ -502,10 +561,31 @@ def main() -> None:
                 continue
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                playlist = build_playlist(tracks, tmpdir)
-                rc = run_ffmpeg(playlist, output_tee)
-                log.info("ffmpeg exited with code %d", rc)
-                restart_delay = RESTART_DELAY if rc == 0 else min(restart_delay * 2, MAX_RESTART_DELAY)
+                if PLAYLIST_CHUNK_SIZE > 0:
+                    # Chunk-based playback
+                    fingerprint = _music_dir_fingerprint()
+                    for i in range(0, len(tracks), PLAYLIST_CHUNK_SIZE):
+                        chunk = tracks[i : i + PLAYLIST_CHUNK_SIZE]
+                        log.info(
+                            "Playing chunk %d/%d (%d tracks)",
+                            i // PLAYLIST_CHUNK_SIZE + 1,
+                            (len(tracks) + PLAYLIST_CHUNK_SIZE - 1) // PLAYLIST_CHUNK_SIZE,
+                            len(chunk),
+                        )
+                        playlist = build_playlist(chunk, tmpdir, repeat=1)
+                        rc, music_changed = run_ffmpeg(playlist, output_tee, fingerprint=fingerprint)
+                        log.info("ffmpeg exited with code %d", rc)
+                        restart_delay = RESTART_DELAY if rc == 0 else min(restart_delay * 2, MAX_RESTART_DELAY)
+                        if music_changed:
+                            log.info("Music directory changed, rebuilding playlist")
+                            break
+                    # End of all chunks or music changed → restart outer loop
+                else:
+                    # Legacy mode: single giant playlist
+                    playlist = build_playlist(tracks, tmpdir)
+                    rc, _changed = run_ffmpeg(playlist, output_tee)
+                    log.info("ffmpeg exited with code %d", rc)
+                    restart_delay = RESTART_DELAY if rc == 0 else min(restart_delay * 2, MAX_RESTART_DELAY)
 
             log.info("Restarting cycle in %ds...", restart_delay)
             time.sleep(restart_delay)
