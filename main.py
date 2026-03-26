@@ -26,6 +26,7 @@ MUSIC_DIR = Path("/data/music")
 ARCHIVE_DIR = Path("/data/archive")
 ASSETS_DIR = Path("/app/assets")
 NORMALIZED_DIR = Path("/data/normalized")
+HEALTHCHECK_FILE = Path("/tmp/healthcheck")
 
 # Prefer JPG over PNG for faster decoding
 BACKGROUND = next(
@@ -452,6 +453,10 @@ def run_ffmpeg(
     ]
 
     log.info("Starting ffmpeg stream...")
+    try:
+        HEALTHCHECK_FILE.write_text(str(time.time()))
+    except OSError:
+        pass
     proc: subprocess.Popen | None = None
     music_changed = False
     try:
@@ -472,6 +477,10 @@ def run_ffmpeg(
             if now >= next_heartbeat:
                 elapsed = int(now - stream_start)
                 log.info("Stream heartbeat: ffmpeg running (%dm%02ds)", elapsed // 60, elapsed % 60)
+                try:
+                    HEALTHCHECK_FILE.write_text(str(time.time()))
+                except OSError:
+                    pass
                 next_heartbeat = now + STREAM_HEARTBEAT_INTERVAL
             if now >= next_normalize_due:
                 normalized = normalize_tracks(max_files=NORMALIZE_MAX_FILES_PER_CYCLE)

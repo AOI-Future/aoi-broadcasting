@@ -7,7 +7,7 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-COPY main.py .
+COPY main.py healthcheck.py ./
 
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin streamer && \
     mkdir -p /data/music /app/assets && \
