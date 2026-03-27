@@ -63,7 +63,7 @@ class MusicDirFingerprintTests(unittest.TestCase):
             finally:
                 main.MUSIC_DIR = old_music
         self.assertIsInstance(fp, str)
-        self.assertEqual(len(fp), 40)
+        self.assertEqual(len(fp), 64)
 
     def test_stable_with_same_files(self):
         old_music = main.MUSIC_DIR

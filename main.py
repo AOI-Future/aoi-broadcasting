@@ -89,7 +89,7 @@ def _archive_destination(source: Path) -> Path:
 def _normalization_signature(track: Path) -> str:
     st = track.stat()
     payload = f"{track.name}:{st.st_size}:{st.st_mtime_ns}".encode("utf-8")
-    return hashlib.sha1(payload).hexdigest()[:12]
+    return hashlib.sha256(payload).hexdigest()[:12]
 
 
 def _normalized_path(track: Path) -> Path:
@@ -108,7 +108,7 @@ def _music_dir_fingerprint() -> str:
         except OSError:
             continue
     payload = "\n".join(entries).encode("utf-8")
-    return hashlib.sha1(payload).hexdigest()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def source_tracks() -> list[Path]:
