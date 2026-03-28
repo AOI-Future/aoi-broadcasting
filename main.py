@@ -325,13 +325,13 @@ def build_outputs() -> str:
     if YOUTUBE_URL and YOUTUBE_KEY:
         yt = _build_target(YOUTUBE_URL, YOUTUBE_KEY, "YouTube")
         if yt:
-            outputs.append(f"[f=flv]{yt}")
+            outputs.append(f"[f=flv:onfail=ignore]{yt}")
             log.info("YouTube output configured")
 
     if KICK_URL and KICK_KEY:
         kick = _build_target(KICK_URL, KICK_KEY, "Kick")
         if kick:
-            outputs.append(f"[f=flv]{kick}")
+            outputs.append(f"[f=flv:onfail=ignore]{kick}")
             log.info("Kick output configured")
 
     if not outputs:

@@ -20,6 +20,38 @@ YOUTUBE_WATCH_URL="$(grep YOUTUBE_WATCH_URL "$ENV_FILE" 2>/dev/null | cut -d= -f
 YOUTUBE_CHANNEL_ID="$(grep YOUTUBE_CHANNEL_ID "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
 KICK_CHANNEL_URL="$(grep KICK_CHANNEL_URL "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
 
+ASSETS_DIR="$COMPOSE_DIR/assets/${CHANNEL}"
+
+# ─── 0. 背景画像 PNG→JPG 自動変換 ───
+# PNG背景はffmpegのloop動画生成でcolor_range=unknownになり
+# YouTubeが映像として認識できない問題の根本対策
+ensure_jpg_background() {
+    local png_file jpg_file
+    png_file=$(find "$ASSETS_DIR" -maxdepth 1 -name "*.png" ! -name "*.disabled" ! -name "*.bak*" -print -quit 2>/dev/null)
+    jpg_file="$ASSETS_DIR/background.jpg"
+
+    if [ -z "$png_file" ]; then return 0; fi
+
+    # JPGが既に存在し、PNGより新しければスキップ
+    if [ -f "$jpg_file" ] && [ "$jpg_file" -nt "$png_file" ]; then return 0; fi
+
+    log "PNG背景を検知: $(basename "$png_file") → JPGに変換します"
+    if python3 -c "
+from PIL import Image
+import sys
+img = Image.open(sys.argv[1])
+img.convert('RGB').save(sys.argv[2], quality=90)
+" "$png_file" "$jpg_file" 2>/dev/null; then
+        mv "$png_file" "${png_file}.disabled"
+        log "背景画像を変換しました: $(basename "$png_file") → background.jpg"
+        notify "🖼️ **NICTIA Radio ${CHANNEL}**: PNG背景をJPGに自動変換しました → コンテナ再作成します"
+        do_restart "PNG→JPG background conversion"
+        exit 0
+    else
+        log "WARNING: PNG→JPG変換に失敗しました"
+    fi
+}
+
 LV1_FAIL_STATE="$COMPOSE_DIR/ops/.watchdog-fail-lv1-${CHANNEL}"
 LV2_FAIL_STATE="$COMPOSE_DIR/ops/.watchdog-fail-lv2-${CHANNEL}"
 LV2_RESTART_COUNT_FILE="$COMPOSE_DIR/ops/.watchdog-lv2-restarts-${CHANNEL}"
@@ -175,6 +207,10 @@ check_youtube_channel_live() {
 # Migrate old fail state files
 rm -f "$COMPOSE_DIR/ops/.watchdog-fail" "$COMPOSE_DIR/ops/.watchdog-fail-${CHANNEL}"
 
+
+# ─── 0. PNG背景の自動変換 ───
+ensure_jpg_background
+
 # ─── 1. コンテナ起動確認 ───
 STATUS=$(docker inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo "missing")
 if [ "$STATUS" != "running" ]; then
@@ -258,9 +294,10 @@ check_youtube() {
         local reason
         reason=$(echo "$json_output" | grep -i "ERROR\|This\|is not" | head -1 | cut -c1-80)
         if echo "$json_output" | grep -qi "This live stream recording is not available\|video is unavailable\|This video isn't available anymore"; then
-            LV2_INCONCLUSIVE_DETAILS="${LV2_INCONCLUSIVE_DETAILS}YouTube: ⚠️ watch URL が終了/無効の可能性 (${reason:-取得失敗}) / "
-            log "Lv2 YouTube: watch URL appears stale/inactive ⚠️ ($reason)"
-            return 2
+            # stale/終了済みURLはライブ終了と同等 → fail扱いでチャンネル /live フォールバックを発動させる
+            LV2_DETAILS="${LV2_DETAILS}YouTube: ❌ watch URL が終了/無効 (${reason:-取得失敗}) / "
+            log "Lv2 YouTube: watch URL stale/ended ❌ ($reason)"
+            return 1
         fi
         LV2_DETAILS="${LV2_DETAILS}YouTube: ❌ ${reason:-取得失敗} / "
         log "Lv2 YouTube: NOT reachable ❌ ($reason)"

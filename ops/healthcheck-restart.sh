@@ -36,7 +36,7 @@ for ch in ch1 ch2; do
             ;;
         unhealthy)
             # unhealthy検知 → コンテナ再作成
-            LAST_LOG=$(docker inspect -f {{(index .State.Health.Log 0).Output}} "$CONTAINER" 2>/dev/null | head -c 200)
+            LAST_LOG=$(docker inspect -f '{{(index .State.Health.Log 0).Output}}' "$CONTAINER" 2>/dev/null | head -c 200)
             notify "🔧 **NICTIA Radio ${ch}**: Docker healthcheck unhealthy → コンテナ再作成します
 📋 healthcheck出力: ${LAST_LOG:-N/A}
 ⚙️ 対応: docker compose rm -sf / up -d ${ch}"
