@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -272,6 +273,63 @@ def run_idle_maintenance() -> tuple[int, int, int]:
     return archived, pruned, removed_cache
 
 
+class BackgroundNormalizer:
+    """Run normalization in a background thread so it never blocks streaming."""
+
+    def __init__(self) -> None:
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._last_count = 0
+
+    def start(self, max_files: int = NORMALIZE_BOOTSTRAP_BATCH) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop_event.clear()
+            self._thread = threading.Thread(
+                target=self._run, args=(max_files,), daemon=True
+            )
+            self._thread.start()
+
+    def _run(self, max_files: int) -> None:
+        try:
+            normalized = 0
+            for track in source_tracks():
+                if self._stop_event.is_set():
+                    break
+                normalized_path = _normalized_path(track)
+                if normalized_path.exists():
+                    continue
+                if _normalize_track(track, normalized_path):
+                    normalized += 1
+                if normalized >= max_files:
+                    break
+            with self._lock:
+                self._last_count = normalized
+            if normalized:
+                log.info("Background normalizer finished: %d track(s)", normalized)
+        except Exception as e:
+            log.warning("Background normalizer error: %s", e)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        with self._lock:
+            if self._thread is not None:
+                self._thread.join(timeout=5)
+                self._thread = None
+
+    @property
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def last_count(self) -> int:
+        with self._lock:
+            return self._last_count
+
+
 def build_playlist(tracks: list[Path], tmpdir: str, repeat: int | None = None) -> Path:
     playlist = Path(tmpdir) / "playlist.txt"
     repeat_count = repeat if repeat is not None else PLAYLIST_REPEAT_COUNT
@@ -412,6 +470,7 @@ def run_ffmpeg(
     playlist: Path,
     output_tee: str,
     fingerprint: str | None = None,
+    normalizer: BackgroundNormalizer | None = None,
 ) -> tuple[int, bool]:
     """Run ffmpeg for one playlist chunk.
 
@@ -483,9 +542,12 @@ def run_ffmpeg(
                     pass
                 next_heartbeat = now + STREAM_HEARTBEAT_INTERVAL
             if now >= next_normalize_due:
-                normalized = normalize_tracks(max_files=NORMALIZE_MAX_FILES_PER_CYCLE)
-                if normalized:
-                    log.info("In-stream maintenance normalized %d track(s)", normalized)
+                if normalizer is not None:
+                    normalizer.start(max_files=NORMALIZE_MAX_FILES_PER_CYCLE)
+                else:
+                    normalized = normalize_tracks(max_files=NORMALIZE_MAX_FILES_PER_CYCLE)
+                    if normalized:
+                        log.info("In-stream maintenance normalized %d track(s)", normalized)
                 next_normalize_due = now + NORMALIZE_DURING_STREAM_INTERVAL
 
             # Music directory change detection
@@ -539,6 +601,8 @@ def main() -> None:
 
     output_tee = build_outputs()
     restart_delay = RESTART_DELAY
+    normalizer = BackgroundNormalizer()
+    first_boot = True
 
     while True:
         try:
@@ -556,9 +620,16 @@ def main() -> None:
                 time.sleep(WAIT_NO_MUSIC)
                 continue
 
-            bootstrap_normalized = normalize_tracks(max_files=NORMALIZE_BOOTSTRAP_BATCH)
-            if bootstrap_normalized:
-                log.info("Bootstrap normalized %d track(s)", bootstrap_normalized)
+            # First boot: block on bootstrap to ensure at least some tracks are ready.
+            # Subsequent cycles: normalize in background to avoid blocking stream restart.
+            if first_boot:
+                bootstrap_normalized = normalize_tracks(max_files=NORMALIZE_BOOTSTRAP_BATCH)
+                if bootstrap_normalized:
+                    log.info("Bootstrap normalized %d track(s)", bootstrap_normalized)
+                first_boot = False
+            else:
+                normalizer.start(max_files=NORMALIZE_BOOTSTRAP_BATCH)
+                log.info("Background normalizer started (non-blocking)")
 
             tracks = stream_ready_tracks(sources)
             if not tracks:
@@ -582,7 +653,7 @@ def main() -> None:
                             len(chunk),
                         )
                         playlist = build_playlist(chunk, tmpdir, repeat=1)
-                        rc, music_changed = run_ffmpeg(playlist, output_tee, fingerprint=fingerprint)
+                        rc, music_changed = run_ffmpeg(playlist, output_tee, fingerprint=fingerprint, normalizer=normalizer)
                         log.info("ffmpeg exited with code %d", rc)
                         restart_delay = RESTART_DELAY if rc == 0 else min(restart_delay * 2, MAX_RESTART_DELAY)
                         if music_changed:
@@ -592,7 +663,7 @@ def main() -> None:
                 else:
                     # Legacy mode: single giant playlist
                     playlist = build_playlist(tracks, tmpdir)
-                    rc, _changed = run_ffmpeg(playlist, output_tee)
+                    rc, _changed = run_ffmpeg(playlist, output_tee, normalizer=normalizer)
                     log.info("ffmpeg exited with code %d", rc)
                     restart_delay = RESTART_DELAY if rc == 0 else min(restart_delay * 2, MAX_RESTART_DELAY)
 
@@ -601,6 +672,7 @@ def main() -> None:
 
         except KeyboardInterrupt:
             log.info("Shutting down gracefully")
+            normalizer.stop()
             break
         except Exception as e:
             log.error("Unexpected error: %s", e, exc_info=True)
