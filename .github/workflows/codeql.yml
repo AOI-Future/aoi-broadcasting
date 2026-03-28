@@ -16,7 +16,7 @@ jobs:
   analyze:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # continue-on-error: true # Keep it non-blocking if there's a risk of failure
+    continue-on-error: true # Keep it non-blocking as per requester's suggestion
 
     strategy:
       fail-fast: false
@@ -31,11 +31,9 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
-          # Explicitly set the python executable to avoid python2 warnings
-          # But as of v3.25.0 this is deprecated/ignored.
-          # The best way to fix "python2 not found" in autobuild is to not use autobuild for python
-          # since it's not strictly necessary for python extraction.
 
+      # Autobuild is commented out for Python to avoid "python2: not found" warnings
+      # and because it's not strictly necessary for Python extraction.
       # - name: Autobuild
       #   uses: github/codeql-action/autobuild@v4
 
