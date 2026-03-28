@@ -31,9 +31,13 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
+          # Explicitly set the python executable to avoid python2 warnings
+          # But as of v3.25.0 this is deprecated/ignored.
+          # The best way to fix "python2 not found" in autobuild is to not use autobuild for python
+          # since it's not strictly necessary for python extraction.
 
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v4
+      # - name: Autobuild
+      #   uses: github/codeql-action/autobuild@v4
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
