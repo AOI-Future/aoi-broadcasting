@@ -620,16 +620,16 @@ def main() -> None:
                 time.sleep(WAIT_NO_MUSIC)
                 continue
 
-            # First boot: block on bootstrap to ensure at least some tracks are ready.
-            # Subsequent cycles: normalize in background to avoid blocking stream restart.
+            # First boot: synchronously normalize just enough tracks to start streaming,
+            # then kick off background normalizer for the rest.
+            # Subsequent cycles: normalize entirely in background.
+            bootstrap_min = max(PLAYLIST_CHUNK_SIZE, 1)
             if first_boot:
-                bootstrap_normalized = normalize_tracks(max_files=NORMALIZE_BOOTSTRAP_BATCH)
+                bootstrap_normalized = normalize_tracks(max_files=bootstrap_min)
                 if bootstrap_normalized:
-                    log.info("Bootstrap normalized %d track(s)", bootstrap_normalized)
+                    log.info("Bootstrap normalized %d track(s) (fast start)", bootstrap_normalized)
                 first_boot = False
-            else:
-                normalizer.start(max_files=NORMALIZE_BOOTSTRAP_BATCH)
-                log.info("Background normalizer started (non-blocking)")
+            normalizer.start(max_files=NORMALIZE_BOOTSTRAP_BATCH)
 
             tracks = stream_ready_tracks(sources)
             if not tracks:
