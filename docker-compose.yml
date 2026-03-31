@@ -1,20 +1,38 @@
+x-streamer: &streamer-base
+  build: .
+  restart: unless-stopped
+  user: "10001:10001"
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  tmpfs:
+    - /tmp
+  healthcheck:
+    test: ["CMD", "python3", "/app/healthcheck.py"]
+    interval: 60s
+    timeout: 10s
+    retries: 3
+    start_period: 120s
+
 services:
-  streamer:
-    build: .
-    container_name: aoi-broadcasting
-    restart: unless-stopped
-    user: "10001:10001"
-    read_only: true
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    tmpfs:
-      - /tmp
+  ch1:
+    <<: *streamer-base
+    container_name: aoi-broadcasting-ch1
     env_file:
-      - .env
+      - .env.ch1
     volumes:
-      - ./music:/data/music
-      - ./archive:/data/archive
-      - ./normalized:/data/normalized
-      - ./assets:/app/assets:ro
+      - ${MUSIC_DIR_CH1:-/opt/suno-mcp/music_data/ch1}:/data/music:ro
+      - ./normalized/ch1:/data/normalized
+      - ./assets/ch1:/app/assets:ro
+
+  ch2:
+    <<: *streamer-base
+    container_name: aoi-broadcasting-ch2
+    env_file:
+      - .env.ch2
+    volumes:
+      - ${MUSIC_DIR_CH2:-/opt/suno-mcp/music_data/ch2}:/data/music:ro
+      - ./normalized/ch2:/data/normalized
+      - ./assets/ch2:/app/assets:ro

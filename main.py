@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,6 +27,7 @@ MUSIC_DIR = Path("/data/music")
 ARCHIVE_DIR = Path("/data/archive")
 ASSETS_DIR = Path("/app/assets")
 NORMALIZED_DIR = Path("/data/normalized")
+HEALTHCHECK_FILE = Path("/tmp/healthcheck")
 
 # Prefer JPG over PNG for faster decoding
 BACKGROUND = next(
@@ -54,6 +56,7 @@ def _env_int(name: str, default: int, minimum: int | None = None) -> int:
     return value
 
 
+ARCHIVE_ENABLED = os.environ.get("ARCHIVE_ENABLED", "false").lower() in ("true", "1", "yes")
 ARCHIVE_DAYS = _env_int("ARCHIVE_DAYS", 30, minimum=1)
 ARCHIVE_RETENTION_DAYS = _env_int("ARCHIVE_RETENTION_DAYS", 0, minimum=0)
 WAIT_NO_MUSIC = _env_int("WAIT_NO_MUSIC", 30, minimum=5)
@@ -62,38 +65,19 @@ MAX_RESTART_DELAY = _env_int("MAX_RESTART_DELAY", 60, minimum=5)
 NORMALIZE_MAX_FILES_PER_CYCLE = _env_int("NORMALIZE_MAX_FILES_PER_CYCLE", 8, minimum=1)
 NORMALIZE_BOOTSTRAP_BATCH = _env_int("NORMALIZE_BOOTSTRAP_BATCH", 50, minimum=1)
 NORMALIZE_DURING_STREAM_INTERVAL = _env_int("NORMALIZE_DURING_STREAM_INTERVAL", 120, minimum=30)
+NORMALIZE_TARGET_I = os.environ.get("NORMALIZE_TARGET_I", "-16").strip() or "-16"
+NORMALIZE_TARGET_LRA = os.environ.get("NORMALIZE_TARGET_LRA", "11").strip() or "11"
+NORMALIZE_TARGET_TP = os.environ.get("NORMALIZE_TARGET_TP", "-1.5").strip() or "-1.5"
 NORMALIZE_NICE_LEVEL = _env_int("NORMALIZE_NICE_LEVEL", 10, minimum=0)
+PLAYLIST_REPEAT_COUNT = _env_int("PLAYLIST_REPEAT_COUNT", 10, minimum=1)
+PLAYLIST_CHUNK_SIZE = _env_int("PLAYLIST_CHUNK_SIZE", 5, minimum=0)
+MUSIC_CHANGE_CHECK_INTERVAL = _env_int("MUSIC_CHANGE_CHECK_INTERVAL", 60, minimum=10)
+MUSIC_CHANGE_DEBOUNCE = _env_int("MUSIC_CHANGE_DEBOUNCE", 60, minimum=0)
+STREAM_HEARTBEAT_INTERVAL = _env_int("STREAM_HEARTBEAT_INTERVAL", 120, minimum=30)
 FFMPEG_NORMALIZE_TIMEOUT = _env_int("FFMPEG_NORMALIZE_TIMEOUT", 1800, minimum=30)
 FFMPEG_LOOP_PREENCODE_TIMEOUT = _env_int("FFMPEG_LOOP_PREENCODE_TIMEOUT", 120, minimum=15)
 
 _CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
-
-
-def _env_float(name: str, default: float, minimum: float, maximum: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        log.warning("Invalid %s=%r, using default %s", name, raw, default)
-        return default
-    if value < minimum or value > maximum:
-        log.warning(
-            "Invalid %s=%s, expected %.2f..%.2f; using default %s",
-            name,
-            raw,
-            minimum,
-            maximum,
-            default,
-        )
-        return default
-    return value
-
-
-NORMALIZE_TARGET_I_VALUE = _env_float("NORMALIZE_TARGET_I", -16.0, -70.0, -5.0)
-NORMALIZE_TARGET_LRA_VALUE = _env_float("NORMALIZE_TARGET_LRA", 11.0, 1.0, 50.0)
-NORMALIZE_TARGET_TP_VALUE = _env_float("NORMALIZE_TARGET_TP", -1.5, -9.0, 0.0)
 
 
 def _archive_destination(source: Path) -> Path:
@@ -107,11 +91,26 @@ def _archive_destination(source: Path) -> Path:
 def _normalization_signature(track: Path) -> str:
     st = track.stat()
     payload = f"{track.name}:{st.st_size}:{st.st_mtime_ns}".encode("utf-8")
-    return hashlib.sha1(payload).hexdigest()[:12]
+    return hashlib.sha256(payload).hexdigest()[:12]
 
 
 def _normalized_path(track: Path) -> Path:
     return NORMALIZED_DIR / f"{track.stem}.{_normalization_signature(track)}.wav"
+
+
+def _music_dir_fingerprint() -> str:
+    """Return a hash summarising the current state of the music directory."""
+    entries: list[str] = []
+    for p in sorted(MUSIC_DIR.glob("*.wav")):
+        if not p.is_file() or p.is_symlink():
+            continue
+        try:
+            st = p.stat()
+            entries.append(f"{p.name}:{st.st_size}:{st.st_mtime_ns}")
+        except OSError:
+            continue
+    payload = "\n".join(entries).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def source_tracks() -> list[Path]:
@@ -134,6 +133,8 @@ def stream_ready_tracks(tracks: list[Path]) -> list[Path]:
 
 
 def archive_old_files() -> int:
+    if not ARCHIVE_ENABLED:
+        return 0
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     cutoff = datetime.now() - timedelta(days=ARCHIVE_DAYS)
     moved = 0
@@ -141,16 +142,27 @@ def archive_old_files() -> int:
         mtime = datetime.fromtimestamp(f.stat().st_mtime)
         if mtime < cutoff:
             dest = _archive_destination(f)
-            shutil.move(str(f), str(dest))
-            log.info("Archived: %s -> %s (mtime: %s)", f.name, dest.name, mtime.isoformat())
-            moved += 1
+            try:
+                shutil.copy2(str(f), str(dest))
+            except OSError as e:
+                log.warning("Archive copy failed %s: %s", f.name, e)
+                continue
+            try:
+                f.unlink()
+                log.info("Archived: %s -> %s (mtime: %s)", f.name, dest.name, mtime.isoformat())
+                moved += 1
+            except PermissionError:
+                # Source is on a read-only mount; remove the copy to avoid
+                # duplicating it every cycle.
+                dest.unlink(missing_ok=True)
+                log.debug("Cannot archive %s (source not deletable, skipping)", f.name)
     if moved:
         log.info("Archived %d file(s)", moved)
     return moved
 
 
 def prune_archive() -> int:
-    if ARCHIVE_RETENTION_DAYS <= 0:
+    if not ARCHIVE_ENABLED or ARCHIVE_RETENTION_DAYS <= 0:
         return 0
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     cutoff = datetime.now() - timedelta(days=ARCHIVE_RETENTION_DAYS)
@@ -192,9 +204,9 @@ def _normalize_track(track: Path, normalized_path: Path) -> bool:
     tmp = Path(tmp_path)
 
     filter_graph = (
-        f"loudnorm=I={NORMALIZE_TARGET_I_VALUE}:"
-        f"LRA={NORMALIZE_TARGET_LRA_VALUE}:"
-        f"TP={NORMALIZE_TARGET_TP_VALUE}:"
+        f"loudnorm=I={NORMALIZE_TARGET_I}:"
+        f"LRA={NORMALIZE_TARGET_LRA}:"
+        f"TP={NORMALIZE_TARGET_TP}:"
         "dual_mono=true"
     )
     cmd = [
@@ -261,13 +273,76 @@ def run_idle_maintenance() -> tuple[int, int, int]:
     return archived, pruned, removed_cache
 
 
-def build_playlist(tracks: list[Path], tmpdir: str) -> Path:
+class BackgroundNormalizer:
+    """Run normalization in a background thread so it never blocks streaming."""
+
+    def __init__(self) -> None:
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._last_count = 0
+
+    def start(self, max_files: int = NORMALIZE_BOOTSTRAP_BATCH) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop_event.clear()
+            self._thread = threading.Thread(
+                target=self._run, args=(max_files,), daemon=True
+            )
+            self._thread.start()
+
+    def _run(self, max_files: int) -> None:
+        try:
+            normalized = 0
+            for track in source_tracks():
+                if self._stop_event.is_set():
+                    break
+                normalized_path = _normalized_path(track)
+                if normalized_path.exists():
+                    continue
+                if _normalize_track(track, normalized_path):
+                    normalized += 1
+                if normalized >= max_files:
+                    break
+            with self._lock:
+                self._last_count = normalized
+            if normalized:
+                log.info("Background normalizer finished: %d track(s)", normalized)
+        except Exception as e:
+            log.warning("Background normalizer error: %s", e)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        with self._lock:
+            if self._thread is not None:
+                self._thread.join(timeout=5)
+                self._thread = None
+
+    @property
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def last_count(self) -> int:
+        with self._lock:
+            return self._last_count
+
+
+def build_playlist(tracks: list[Path], tmpdir: str, repeat: int | None = None) -> Path:
     playlist = Path(tmpdir) / "playlist.txt"
+    repeat_count = repeat if repeat is not None else PLAYLIST_REPEAT_COUNT
     with open(playlist, "w", encoding="utf-8") as f:
-        for track in tracks:
-            safe = str(track).replace("'", "'\\''")
-            f.write(f"file '{safe}'\n")
-    log.info("Playlist: %d tracks", len(tracks))
+        for i in range(repeat_count):
+            cycle = tracks.copy()
+            if i > 0:
+                random.shuffle(cycle)
+            for track in cycle:
+                safe = str(track).replace("'", "'\\''")
+                f.write(f"file '{safe}'\n")
+    total = len(tracks) * repeat_count
+    log.info("Playlist: %d tracks (%d unique × %d repeat cycles)", total, len(tracks), repeat_count)
     return playlist
 
 
@@ -308,13 +383,13 @@ def build_outputs() -> str:
     if YOUTUBE_URL and YOUTUBE_KEY:
         yt = _build_target(YOUTUBE_URL, YOUTUBE_KEY, "YouTube")
         if yt:
-            outputs.append(f"[f=flv]{yt}")
+            outputs.append(f"[f=flv:onfail=ignore]{yt}")
             log.info("YouTube output configured")
 
     if KICK_URL and KICK_KEY:
         kick = _build_target(KICK_URL, KICK_KEY, "Kick")
         if kick:
-            outputs.append(f"[f=flv]{kick}")
+            outputs.append(f"[f=flv:onfail=ignore]{kick}")
             log.info("Kick output configured")
 
     if not outputs:
@@ -359,6 +434,8 @@ def _ensure_loop_video() -> None:
                 "500k",
                 "-pix_fmt",
                 "yuv420p",
+                "-color_range",
+                "tv",
                 "-vf",
                 "scale=1280:720",
                 "-r",
@@ -389,7 +466,18 @@ def _ensure_loop_video() -> None:
         raise
 
 
-def run_ffmpeg(playlist: Path, output_tee: str) -> int:
+def run_ffmpeg(
+    playlist: Path,
+    output_tee: str,
+    fingerprint: str | None = None,
+    normalizer: BackgroundNormalizer | None = None,
+) -> tuple[int, bool]:
+    """Run ffmpeg for one playlist chunk.
+
+    Returns ``(return_code, music_changed)`` where *music_changed* is
+    ``True`` when a directory change was detected and ffmpeg was stopped
+    early so the caller can rebuild the playlist.
+    """
     _ensure_loop_video()
 
     cmd = [
@@ -424,29 +512,76 @@ def run_ffmpeg(playlist: Path, output_tee: str) -> int:
     ]
 
     log.info("Starting ffmpeg stream...")
+    try:
+        HEALTHCHECK_FILE.write_text(str(time.time()))
+    except OSError:
+        pass
     proc: subprocess.Popen | None = None
+    music_changed = False
     try:
         proc = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr)
         next_normalize_due = time.monotonic() + NORMALIZE_DURING_STREAM_INTERVAL
+        next_heartbeat = time.monotonic() + STREAM_HEARTBEAT_INTERVAL
+        next_music_check = time.monotonic() + MUSIC_CHANGE_CHECK_INTERVAL
+        stream_start = time.monotonic()
+        pending_change_fp: str | None = None
+        pending_change_time: float = 0.0
 
         while True:
             rc = proc.poll()
             if rc is not None:
-                return rc
+                return rc, music_changed
 
             now = time.monotonic()
+            if now >= next_heartbeat:
+                elapsed = int(now - stream_start)
+                log.info("Stream heartbeat: ffmpeg running (%dm%02ds)", elapsed // 60, elapsed % 60)
+                try:
+                    HEALTHCHECK_FILE.write_text(str(time.time()))
+                except OSError:
+                    pass
+                next_heartbeat = now + STREAM_HEARTBEAT_INTERVAL
             if now >= next_normalize_due:
-                normalized = normalize_tracks(max_files=NORMALIZE_MAX_FILES_PER_CYCLE)
-                if normalized:
-                    log.info("In-stream maintenance normalized %d track(s)", normalized)
+                if normalizer is not None:
+                    normalizer.start(max_files=NORMALIZE_MAX_FILES_PER_CYCLE)
+                else:
+                    normalized = normalize_tracks(max_files=NORMALIZE_MAX_FILES_PER_CYCLE)
+                    if normalized:
+                        log.info("In-stream maintenance normalized %d track(s)", normalized)
                 next_normalize_due = now + NORMALIZE_DURING_STREAM_INTERVAL
+
+            # Music directory change detection
+            if fingerprint is not None and now >= next_music_check:
+                new_fp = _music_dir_fingerprint()
+                if new_fp != fingerprint and pending_change_fp is None:
+                    log.info("Music directory change detected, waiting %ds to confirm...", MUSIC_CHANGE_DEBOUNCE)
+                    pending_change_fp = new_fp
+                    pending_change_time = now
+                elif pending_change_fp is not None:
+                    if now - pending_change_time >= MUSIC_CHANGE_DEBOUNCE:
+                        stable_fp = _music_dir_fingerprint()
+                        if stable_fp != fingerprint:
+                            log.info("Music directory changed (confirmed), stopping current chunk")
+                            music_changed = True
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=10)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                                proc.wait(timeout=5)
+                            return 0, True
+                        else:
+                            log.info("Music directory change reverted, resuming")
+                            pending_change_fp = None
+                next_music_check = now + MUSIC_CHANGE_CHECK_INTERVAL
+
             time.sleep(1)
     except KeyboardInterrupt:
         log.info("Stream interrupted by user")
         raise
     except Exception as e:
         log.error("ffmpeg error: %s", e)
-        return 1
+        return 1, music_changed
     finally:
         if proc and proc.poll() is None:
             log.info("Stopping ffmpeg process...")
@@ -466,6 +601,8 @@ def main() -> None:
 
     output_tee = build_outputs()
     restart_delay = RESTART_DELAY
+    normalizer = BackgroundNormalizer()
+    first_boot = True
 
     while True:
         try:
@@ -483,9 +620,16 @@ def main() -> None:
                 time.sleep(WAIT_NO_MUSIC)
                 continue
 
-            bootstrap_normalized = normalize_tracks(max_files=NORMALIZE_BOOTSTRAP_BATCH)
-            if bootstrap_normalized:
-                log.info("Bootstrap normalized %d track(s)", bootstrap_normalized)
+            # First boot: synchronously normalize just enough tracks to start streaming,
+            # then kick off background normalizer for the rest.
+            # Subsequent cycles: normalize entirely in background.
+            bootstrap_min = max(PLAYLIST_CHUNK_SIZE, 1)
+            if first_boot:
+                bootstrap_normalized = normalize_tracks(max_files=bootstrap_min)
+                if bootstrap_normalized:
+                    log.info("Bootstrap normalized %d track(s) (fast start)", bootstrap_normalized)
+                first_boot = False
+            normalizer.start(max_files=NORMALIZE_BOOTSTRAP_BATCH)
 
             tracks = stream_ready_tracks(sources)
             if not tracks:
@@ -497,16 +641,38 @@ def main() -> None:
                 continue
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                playlist = build_playlist(tracks, tmpdir)
-                rc = run_ffmpeg(playlist, output_tee)
-                log.info("ffmpeg exited with code %d", rc)
-                restart_delay = RESTART_DELAY if rc == 0 else min(restart_delay * 2, MAX_RESTART_DELAY)
+                if PLAYLIST_CHUNK_SIZE > 0:
+                    # Chunk-based playback
+                    fingerprint = _music_dir_fingerprint()
+                    for i in range(0, len(tracks), PLAYLIST_CHUNK_SIZE):
+                        chunk = tracks[i : i + PLAYLIST_CHUNK_SIZE]
+                        log.info(
+                            "Playing chunk %d/%d (%d tracks)",
+                            i // PLAYLIST_CHUNK_SIZE + 1,
+                            (len(tracks) + PLAYLIST_CHUNK_SIZE - 1) // PLAYLIST_CHUNK_SIZE,
+                            len(chunk),
+                        )
+                        playlist = build_playlist(chunk, tmpdir, repeat=1)
+                        rc, music_changed = run_ffmpeg(playlist, output_tee, fingerprint=fingerprint, normalizer=normalizer)
+                        log.info("ffmpeg exited with code %d", rc)
+                        restart_delay = RESTART_DELAY if rc == 0 else min(restart_delay * 2, MAX_RESTART_DELAY)
+                        if music_changed:
+                            log.info("Music directory changed, rebuilding playlist")
+                            break
+                    # End of all chunks or music changed → restart outer loop
+                else:
+                    # Legacy mode: single giant playlist
+                    playlist = build_playlist(tracks, tmpdir)
+                    rc, _changed = run_ffmpeg(playlist, output_tee, normalizer=normalizer)
+                    log.info("ffmpeg exited with code %d", rc)
+                    restart_delay = RESTART_DELAY if rc == 0 else min(restart_delay * 2, MAX_RESTART_DELAY)
 
             log.info("Restarting cycle in %ds...", restart_delay)
             time.sleep(restart_delay)
 
         except KeyboardInterrupt:
             log.info("Shutting down gracefully")
+            normalizer.stop()
             break
         except Exception as e:
             log.error("Unexpected error: %s", e, exc_info=True)

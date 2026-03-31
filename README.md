@@ -2,6 +2,17 @@
 
 Headless streaming server — static background image + WAV playlist to YouTube/Kick via ffmpeg.
 
+## Customization Points
+
+Before running, adjust these to match your environment:
+
+| File | Line | What to change |
+|------|------|----------------|
+| `docker-compose.yml` | `volumes: - ./music:/data/music` | Change `./music` to your WAV files directory (relative or absolute path) |
+| `.env` | `YOUTUBE_URL` / `YOUTUBE_KEY` | Your YouTube Live RTMP ingest URL and stream key |
+| `.env` | `KICK_URL` / `KICK_KEY` | Your Kick RTMP ingest URL and stream key (optional) |
+| `assets/` | `background.jpg` | Replace with your own background image (JPG or PNG) |
+
 ## Quick Start
 
 ```bash
@@ -118,6 +129,15 @@ aoi-broadcasting/
 └── normalized/      # Auto-generated loudness-normalized cache
     └── .gitkeep
 ```
+
+## Release & Security Operations
+
+公開運用に向けた最低限の運用は以下です。
+
+- CI (`.github/workflows/ci.yml`) で `py_compile` + `unittest` を必須化
+- CodeQL (`.github/workflows/codeql.yml`) による静的解析をPR/定期実行（`ENABLE_CODEQL=true` の場合）
+- Dependabot (`.github/dependabot.yml`) で Docker / GitHub Actions 更新を週次追従
+- 脆弱性対応手順は `SECURITY.md` を参照
 
 ## Troubleshooting
 
