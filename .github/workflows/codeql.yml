@@ -14,7 +14,6 @@ permissions:
 
 jobs:
   analyze:
-    if: github.repository_visibility == 'public'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     continue-on-error: true # Keep it non-blocking as per requester's suggestion
@@ -42,3 +41,11 @@ jobs:
         uses: github/codeql-action/analyze@v4
         with:
           upload: false
+          output: sarif-results
+
+      - name: Upload SARIF as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-results-${{ matrix.language }}
+          path: sarif-results
+          retention-days: 14
