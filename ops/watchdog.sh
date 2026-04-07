@@ -123,6 +123,8 @@ last_frame() {
 }
 
 # コンテナ完全再作成（restart ではなく rm + up で RTMP 接続を新規確立）
+# 再作成後にYouTubeのGo Liveを最大3分ポーリングし、成功ならWATCH_URLを自動更新
+# 戻り値: 0=再作成+YouTubeライブ確認, 1=再作成したがライブ未確認
 do_restart() {
     local reason="$1"
     log "Recreating container ($reason)..."
@@ -131,6 +133,39 @@ do_restart() {
         && docker compose up -d $COMPOSE_SERVICE >> "$COMPOSE_DIR/ops/watchdog-${CHANNEL}.log" 2>&1
     rm -f "$LOG_TS_FILE"
     start_cooldown
+
+    # Post-restart: YouTubeがGo Liveするまでポーリング（最大180秒, 30秒間隔）
+    if [ -z "${YOUTUBE_CHANNEL_ID:-}" ]; then return 1; fi
+    log "Post-restart: waiting for YouTube Go Live (polling channel /live, max 180s)..."
+    local attempt max_attempts=6 poll_interval=30
+    for attempt in $(seq 1 $max_attempts); do
+        sleep $poll_interval
+        local output new_id live_status
+        output=$("$YT_DLP" --no-warnings -j "https://www.youtube.com/channel/${YOUTUBE_CHANNEL_ID}/live" 2>&1)
+        if [ $? -ne 0 ]; then
+            log "Post-restart poll ${attempt}/${max_attempts}: yt-dlp failed, retrying..."
+            continue
+        fi
+        live_status=$(echo "$output" | python3 -c "import json,sys; print(json.load(sys.stdin).get('live_status','unknown'))" 2>/dev/null || echo "unknown")
+        if [ "$live_status" = "is_live" ]; then
+            new_id=$(echo "$output" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+            log "Post-restart poll ${attempt}/${max_attempts}: YouTube is live ✅ (id=${new_id})"
+            # WATCH_URL を自動更新
+            if [ -n "$new_id" ] && [ -n "$ENV_FILE" ]; then
+                local new_url="https://youtube.com/live/${new_id}"
+                sed -i "s|^YOUTUBE_WATCH_URL=.*|YOUTUBE_WATCH_URL=${new_url}|" "$ENV_FILE"
+                log "Auto-updated YOUTUBE_WATCH_URL → ${new_url}"
+                notify "✅ **NICTIA Radio ${CHANNEL}**: コンテナ再作成後、YouTubeライブ復旧を確認
+📋 新WATCH_URL: ${new_url}
+⏱️ Go Live まで: $((attempt * poll_interval))秒"
+            fi
+            clear_was_live_recovery
+            return 0
+        fi
+        log "Post-restart poll ${attempt}/${max_attempts}: live_status=${live_status}, retrying..."
+    done
+    log "Post-restart: YouTube Go Live not detected within $((max_attempts * poll_interval))s"
+    return 1
 }
 
 set_inconclusive_marker() { date +%s > "$LV2_INCONCLUSIVE_STATE"; }
@@ -457,22 +492,30 @@ if [ "$LV2_FAIL" -gt 0 ]; then
         reset_fail "$LV2_FAIL_STATE"
     else
         # コンテナ再作成実行
-        LV2_RESTARTS=$((LV2_RESTARTS + 1))
-        printf '%s\n%s\n' "$(date +%s)" "$LV2_RESTARTS" > "$LV2_RESTART_COUNT_FILE"
-
         # was_live が原因の場合、復旧後に旧 URL で再度検知しないようマーカーを設定
         if echo "$LV2_DETAILS" | grep -q "ライブ終了"; then
             mark_was_live_recovery
         fi
 
-        notify "🚨 **NICTIA Radio ${CHANNEL}**: 視聴者側から3サイクル連続で到達不可 → コンテナ再作成します（${LV2_RESTARTS}/${LV2_MAX_RESTARTS}回目）
+        notify "🚨 **NICTIA Radio ${CHANNEL}**: 視聴者側から3サイクル連続で到達不可 → コンテナ再作成します（${LV2_RESTARTS}/${LV2_MAX_RESTARTS}回目の枠を使用）
 📋 検知内容: ${LV2_DETAILS}
 🔌 RTMP接続: ${RTMP}
 🎞️ 最終フレーム: ${FRAME}
 ⚙️ 対応: docker compose rm -sf / up -d $COMPOSE_SERVICE"
         do_restart "viewer-side unreachable"
+        local restart_rc=$?
         reset_fail "$LV2_FAIL_STATE"
         clear_inconclusive_marker
+
+        if [ $restart_rc -eq 0 ]; then
+            # Post-restartでYouTube Go Live確認済み → 再起動枠を消費しない
+            log "Restart succeeded with YouTube Go Live confirmed. Not counting toward daily limit."
+        else
+            # YouTube Go Live未確認 → 再起動枠を消費
+            LV2_RESTARTS=$((LV2_RESTARTS + 1))
+            printf '%s\n%s\n' "$(date +%s)" "$LV2_RESTARTS" > "$LV2_RESTART_COUNT_FILE"
+            log "Restart done but YouTube Go Live not confirmed. Restart count: ${LV2_RESTARTS}/${LV2_MAX_RESTARTS}"
+        fi
     fi
 else
     # Lv2 OK → カウンタリセット
