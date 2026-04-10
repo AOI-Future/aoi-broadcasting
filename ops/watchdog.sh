@@ -503,7 +503,7 @@ if [ "$LV2_FAIL" -gt 0 ]; then
 🎞️ 最終フレーム: ${FRAME}
 ⚙️ 対応: docker compose rm -sf / up -d $COMPOSE_SERVICE"
         do_restart "viewer-side unreachable"
-        local restart_rc=$?
+        restart_rc=$?
         reset_fail "$LV2_FAIL_STATE"
         clear_inconclusive_marker
 
