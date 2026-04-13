@@ -1,0 +1,14 @@
+[Unit]
+Description=AOI Broadcasting YouTube Live Check Timer (%i)
+Documentation=https://github.com/AOI-Future/aoi-broadcasting
+
+[Timer]
+# 起動 5 分後に初回実行
+OnBootSec=5min
+# 前回実行完了から 5 分後に次回実行（cron の */5 相当）
+OnUnitActiveSec=5min
+# 30 秒以内の精度でタイミングを揃える
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

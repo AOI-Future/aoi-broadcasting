@@ -1,0 +1,11 @@
+[Unit]
+Description=AOI Broadcasting YouTube Live Check (%i)
+Documentation=https://github.com/AOI-Future/aoi-broadcasting
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/services/aoi-broadcasting/ops/watchdog.sh %i
+# watchdog.sh は自身のログファイルに書くのでここでは append のみ
+StandardOutput=append:%h/services/aoi-broadcasting/ops/watchdog-%i.log
+StandardError=append:%h/services/aoi-broadcasting/ops/watchdog-%i.log

@@ -1,0 +1,18 @@
+[Unit]
+Description=AOI Broadcasting Container Event Monitor
+Documentation=https://github.com/AOI-Future/aoi-broadcasting
+# Docker daemon が起動するまで待機
+After=docker.service
+
+[Service]
+Type=simple
+ExecStart=%h/services/aoi-broadcasting/ops/container-events-handler.sh
+# Docker daemon 再起動後も自動復旧
+Restart=always
+RestartSec=10
+# ログを journald へ（logrotate 不要になる）
+StandardOutput=append:%h/services/aoi-broadcasting/ops/events-handler.log
+StandardError=append:%h/services/aoi-broadcasting/ops/events-handler.log
+
+[Install]
+WantedBy=default.target
