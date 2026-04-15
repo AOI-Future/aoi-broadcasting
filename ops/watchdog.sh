@@ -61,7 +61,7 @@ LV2_INCONCLUSIVE_STATE="$COMPOSE_DIR/ops/.watchdog-lv2-inconclusive-${CHANNEL}"
 WAS_LIVE_RECOVERY_FILE="$COMPOSE_DIR/ops/.watchdog-was-live-recovery-${CHANNEL}"
 LOG_STALE_SECS=600  # 10分
 COOLDOWN_SECS=900   # 再起動後15分はLv2チェック抑制
-LV2_MAX_RESTARTS=2  # Lv2起因の再起動は最大2回/日。超過後は通知のみ
+LV2_MAX_RESTARTS=6  # Lv2起因の再起動は最大6回/日。超過後は通知のみ
 LV2_RESTART_RESET_SECS=86400  # 24時間でカウンタリセット
 
 log()    { echo "$(date '+%Y-%m-%d %H:%M:%S') $LOG_PREFIX $*"; }
@@ -137,7 +137,7 @@ do_restart() {
     # Post-restart: YouTubeがGo Liveするまでポーリング（最大180秒, 30秒間隔）
     if [ -z "${YOUTUBE_CHANNEL_ID:-}" ]; then return 1; fi
     log "Post-restart: waiting for YouTube Go Live (polling channel /live, max 180s)..."
-    local attempt max_attempts=6 poll_interval=30
+    local attempt max_attempts=20 poll_interval=30
     for attempt in $(seq 1 $max_attempts); do
         sleep $poll_interval
         local output new_id live_status
@@ -149,18 +149,37 @@ do_restart() {
         live_status=$(echo "$output" | python3 -c "import json,sys; print(json.load(sys.stdin).get('live_status','unknown'))" 2>/dev/null || echo "unknown")
         if [ "$live_status" = "is_live" ]; then
             new_id=$(echo "$output" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
-            log "Post-restart poll ${attempt}/${max_attempts}: YouTube is live ✅ (id=${new_id})"
-            # WATCH_URL を自動更新
-            if [ -n "$new_id" ] && [ -n "$ENV_FILE" ]; then
-                local new_url="https://youtube.com/live/${new_id}"
-                sed -i "s|^YOUTUBE_WATCH_URL=.*|YOUTUBE_WATCH_URL=${new_url}|" "$ENV_FILE"
-                log "Auto-updated YOUTUBE_WATCH_URL → ${new_url}"
-                notify "✅ **NICTIA Radio ${CHANNEL}**: コンテナ再作成後、YouTubeライブ復旧を確認
+            log "Post-restart poll ${attempt}/${max_attempts}: YouTube is_live (id=${new_id}), checking HLS delivery..."
+            # HLS到達確認（ゴースト配信チェック）
+            check_hls_delivery "$YOUTUBE_CHANNEL_ID"
+            local hls_rc=$?
+            if [ $hls_rc -eq 0 ]; then
+                log "Post-restart poll ${attempt}/${max_attempts}: live + HLS delivering ✅"
+                if [ -n "$new_id" ] && [ -n "$ENV_FILE" ]; then
+                    local new_url="https://youtube.com/live/${new_id}"
+                    sed -i "s|^YOUTUBE_WATCH_URL=.*|YOUTUBE_WATCH_URL=${new_url}|" "$ENV_FILE"
+                    log "Auto-updated YOUTUBE_WATCH_URL → ${new_url}"
+                    notify "✅ **NICTIA Radio ${CHANNEL}**: コンテナ再作成後、YouTubeライブ+HLS配信を確認
 📋 新WATCH_URL: ${new_url}
-⏱️ Go Live まで: $((attempt * poll_interval))秒"
+⏱️ Go Live + HLS確認まで: $((attempt * poll_interval))秒"
+                fi
+                clear_was_live_recovery
+                return 0
+            elif [ $hls_rc -eq 1 ]; then
+                log "Post-restart poll ${attempt}/${max_attempts}: is_live but ghost streaming, continue polling..."
+                continue
+            else
+                log "Post-restart poll ${attempt}/${max_attempts}: is_live, HLS inconclusive → treating as success"
+                if [ -n "$new_id" ] && [ -n "$ENV_FILE" ]; then
+                    local new_url="https://youtube.com/live/${new_id}"
+                    sed -i "s|^YOUTUBE_WATCH_URL=.*|YOUTUBE_WATCH_URL=${new_url}|" "$ENV_FILE"
+                    log "Auto-updated YOUTUBE_WATCH_URL → ${new_url}"
+                    notify "✅ **NICTIA Radio ${CHANNEL}**: コンテナ再作成後、YouTubeライブ復旧（HLS判定不能）
+📋 新WATCH_URL: ${new_url}"
+                fi
+                clear_was_live_recovery
+                return 0
             fi
-            clear_was_live_recovery
-            return 0
         fi
         log "Post-restart poll ${attempt}/${max_attempts}: live_status=${live_status}, retrying..."
     done
@@ -236,6 +255,30 @@ check_youtube_channel_live() {
     fi
 
     log "Lv2 YouTube channel /live: inconclusive (rc=$rc)"
+    return 2
+}
+
+
+# ─── HLS到達確認（ゴースト配信検知） ───
+# live_status=is_live でも実際に映像が視聴者に届いているかを yt-dlp -g で確認する。
+# ゴースト配信: RTMP接続OK・YouTubeがis_live扱い・でもCDNが映像を配信しない状態
+# returns: 0=配信中, 1=ゴースト配信/未到達, 2=判定不能
+check_hls_delivery() {
+    local channel_id="$1"
+    local url="https://www.youtube.com/channel/${channel_id}/live"
+    local output stream_url rc
+    output=$(timeout 30 "$YT_DLP" --no-warnings -g "$url" 2>&1)
+    rc=$?
+    stream_url=$(echo "$output" | grep -v "^ERROR" | grep -v "^WARNING" | grep -v "^$" | head -1)
+    if [ $rc -eq 0 ] && [ -n "$stream_url" ]; then
+        log "HLS delivery check: stream URL confirmed ✅"
+        return 0
+    fi
+    if echo "$output" | grep -qi "not currently live\|begin in a few\|recording is not available\|This live event will begin"; then
+        log "HLS delivery check: not delivering (ghost streaming or not yet live) ❌"
+        return 1
+    fi
+    log "HLS delivery check: inconclusive (rc=$rc)"
     return 2
 }
 
@@ -344,10 +387,32 @@ check_youtube() {
 
     case "$live_status" in
         is_live)
-            log "Lv2 YouTube: stream is live ✅ (live_status=$live_status)"
-            # ライブ確認できたら was_live 復旧マーカーをクリア
-            clear_was_live_recovery
-            return 0
+            # HLS到達確認（ゴースト配信検知）
+            if [ -n "${YOUTUBE_CHANNEL_ID:-}" ]; then
+                check_hls_delivery "$YOUTUBE_CHANNEL_ID"
+                local hls_rc=$?
+                case $hls_rc in
+                    0)
+                        log "Lv2 YouTube: live + HLS delivering ✅ (live_status=$live_status)"
+                        clear_was_live_recovery
+                        return 0
+                        ;;
+                    1)
+                        LV2_DETAILS="${LV2_DETAILS}YouTube: ❌ ゴースト配信（is_live だが映像未配信）/ "
+                        log "Lv2 YouTube: ghost streaming ❌ (is_live but HLS not delivering)"
+                        return 1
+                        ;;
+                    2)
+                        log "Lv2 YouTube: is_live, HLS check inconclusive → OK"
+                        clear_was_live_recovery
+                        return 0
+                        ;;
+                esac
+            else
+                log "Lv2 YouTube: stream is live ✅ (live_status=$live_status)"
+                clear_was_live_recovery
+                return 0
+            fi
             ;;
         was_live|post_live)
             # ライブ終了: YouTube はデータを受け付けるが配信しない
