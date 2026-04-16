@@ -63,15 +63,25 @@ def authenticate() -> Credentials:
         print("  4. JSON をダウンロードして ops/credentials/client_secret.json として保存")
         raise FileNotFoundError(str(CLIENT_SECRET_FILE))
 
-    print("Starting OAuth2 flow (console mode — no browser required on VPS)...")
-    print()
-
     flow = InstalledAppFlow.from_client_secrets_file(
         str(CLIENT_SECRET_FILE),
         scopes=SCOPES,
     )
-    # run_console(): URL を表示 → ブラウザで承認 → コードをペースト
-    creds = flow.run_console()
+
+    # ブラウザが使える環境: run_local_server() でリダイレクトを自動キャッチ
+    # ブラウザなし (VPS): --headless フラグで手動コード入力
+    import sys
+    if "--headless" in sys.argv:
+        print("Headless mode: Visit the URL below and paste the authorization code.")
+        print()
+        auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
+        print(f"Open this URL:\n  {auth_url}\n")
+        code = input("Enter authorization code: ").strip()
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+    else:
+        print("Opening browser for OAuth authorization...")
+        creds = flow.run_local_server(port=0, open_browser=True)
     _save_token(creds)
     print(f"\nToken saved to: {TOKEN_FILE}")
     return creds

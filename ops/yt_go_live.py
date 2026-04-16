@@ -117,21 +117,49 @@ def wait_for_stream_active(youtube, stream_id: str, max_wait: int = 300) -> bool
 # liveBroadcasts
 # ---------------------------------------------------------------------------
 
+def get_latest_broadcast_meta(youtube) -> tuple[str, str]:
+    """直近の liveBroadcast からタイトルと説明文を取得する（新規作成時に引き継ぐ）。"""
+    for status in ("active", "completed"):
+        try:
+            resp = youtube.liveBroadcasts().list(
+                part="snippet",
+                broadcastStatus=status,
+                maxResults=1,
+            ).execute()
+            items = resp.get("items", [])
+            if items:
+                snip = items[0]["snippet"]
+                return snip.get("title", ""), snip.get("description", "")
+        except Exception:
+            pass
+    return "", ""
+
+
 def create_broadcast(youtube, title: str, dry_run: bool = False) -> dict:
     """
     liveBroadcast を作成する。
     enableAutoStart=True + enableMonitorStream=False により
     RTMP ストリームが active になった瞬間に自動で live 遷移する。
+    タイトル・説明文は直近のbroadcastから引き継ぐ。
     """
     scheduled_start = (datetime.now(timezone.utc) + timedelta(seconds=60)).strftime(
         "%Y-%m-%dT%H:%M:%S.000Z"
     )
 
+    # 直近broadcastのメタデータを引き継ぐ
+    prev_title, prev_desc = ("", "") if dry_run else get_latest_broadcast_meta(youtube)
+    use_title = prev_title if prev_title else title
+    use_desc = prev_desc if prev_desc else "NICTIA Radio — AI-powered ambient music station by AOI Future"
+    if prev_title:
+        print(f"Inheriting title from previous broadcast: {use_title[:60]}...")
+    if prev_desc:
+        print(f"Inheriting description ({len(use_desc)} chars)")
+
     body = {
         "snippet": {
-            "title": title,
+            "title": use_title,
             "scheduledStartTime": scheduled_start,
-            "description": "NICTIA Radio — AI-powered ambient music station by AOI Future",
+            "description": use_desc,
         },
         "status": {
             "privacyStatus": "public",
