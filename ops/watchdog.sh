@@ -130,23 +130,27 @@ last_frame() {
 do_restart() {
     local reason="$1"
     log "Recreating container ($reason)..."
-    cd "$COMPOSE_DIR" \
-        && docker compose rm -sf $COMPOSE_SERVICE >> "$COMPOSE_DIR/ops/watchdog-${CHANNEL}.log" 2>&1 \
-        && docker compose up -d $COMPOSE_SERVICE >> "$COMPOSE_DIR/ops/watchdog-${CHANNEL}.log" 2>&1
-    rm -f "$LOG_TS_FILE"
-    start_cooldown
 
-    # ── YouTube Data API 優先: broadcast 作成 + bind (enableAutoStart=True) ──
+    # Step 1: コンテナ停止（RTMP切断）
+    cd "$COMPOSE_DIR" \
+        && docker compose rm -sf $COMPOSE_SERVICE >> "$COMPOSE_DIR/ops/watchdog-${CHANNEL}.log" 2>&1
+    rm -f "$LOG_TS_FILE"
+
+    # Step 2: YouTube Data API — 旧broadcast終了 + 新broadcast作成
+    # ※ docker compose up -d の前に実行することが必須:
+    #   up -d 後だとRTMPが旧broadcastに再接続し、enableAutoStartが発火しない
     if [ -x "${YT_VENV_PYTHON:-}" ] && [ -f "${YT_GO_LIVE_PY:-}" ]; then
-        log "Post-restart: calling yt_go_live.py (YouTube Data API)..."
+        log "Pre-start: calling yt_go_live.py (end old + create new broadcast)..."
         local api_output api_rc api_url
         api_output=$("$YT_VENV_PYTHON" "$YT_GO_LIVE_PY" \
             --channel "${CHANNEL^^}" --env-file "$ENV_FILE" 2>&1) || true
         api_rc=$?
-        # ログ出力（長い場合は最後の10行のみ）
         echo "$api_output" | tail -10 | while IFS= read -r line; do log "$line"; done
         if [ $api_rc -eq 0 ]; then
             api_url=$(echo "$api_output" | grep '^WATCH_URL=' | cut -d= -f2-)
+            # Step 3: コンテナ起動（RTMP接続 → enableAutoStart → 自動Go Live）
+            docker compose up -d $COMPOSE_SERVICE >> "$COMPOSE_DIR/ops/watchdog-${CHANNEL}.log" 2>&1
+            start_cooldown
             notify "✅ **NICTIA Radio ${CHANNEL}**: YouTube Data API で broadcast 作成
 📋 WATCH_URL: ${api_url:-不明}
 ⚡ enableAutoStart=True / 公開設定済み — RTMP active 後に自動 Go Live"
@@ -155,6 +159,10 @@ do_restart() {
         fi
         log "WARNING: yt_go_live.py failed (rc=$api_rc) — falling back to yt-dlp polling..."
     fi
+
+    # Step 3 (フォールバック): コンテナ起動
+    docker compose up -d $COMPOSE_SERVICE >> "$COMPOSE_DIR/ops/watchdog-${CHANNEL}.log" 2>&1
+    start_cooldown
 
     # ── フォールバック: yt-dlp でGo Liveをポーリング ──
     # YouTube Data API 未設定時 or API 失敗時に使用
