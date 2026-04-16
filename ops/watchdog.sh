@@ -14,6 +14,8 @@ COMPOSE_SERVICE="$CHANNEL"
 DISCORD_WEBHOOK_URL="$(grep DISCORD_WEBHOOK_URL "$HOME/clawd/.env" 2>/dev/null | cut -d= -f2-)"
 LOG_PREFIX="[broadcasting-${CHANNEL}]"
 YT_DLP="/home/shugo/.local/share/yt-dlp-venv/bin/yt-dlp"
+YT_VENV_PYTHON="$COMPOSE_DIR/ops/yt-venv/bin/python3"
+YT_GO_LIVE_PY="$COMPOSE_DIR/ops/yt_go_live.py"
 
 ENV_FILE="$COMPOSE_DIR/.env.${CHANNEL}"
 YOUTUBE_WATCH_URL="$(grep YOUTUBE_WATCH_URL "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
@@ -134,7 +136,28 @@ do_restart() {
     rm -f "$LOG_TS_FILE"
     start_cooldown
 
-    # Post-restart: YouTubeがGo Liveするまでポーリング（最大180秒, 30秒間隔）
+    # ── YouTube Data API 優先: broadcast 作成 + bind (enableAutoStart=True) ──
+    if [ -x "${YT_VENV_PYTHON:-}" ] && [ -f "${YT_GO_LIVE_PY:-}" ]; then
+        log "Post-restart: calling yt_go_live.py (YouTube Data API)..."
+        local api_output api_rc api_url
+        api_output=$("$YT_VENV_PYTHON" "$YT_GO_LIVE_PY" \
+            --channel "${CHANNEL^^}" --env-file "$ENV_FILE" 2>&1) || true
+        api_rc=$?
+        # ログ出力（長い場合は最後の10行のみ）
+        echo "$api_output" | tail -10 | while IFS= read -r line; do log "$line"; done
+        if [ $api_rc -eq 0 ]; then
+            api_url=$(echo "$api_output" | grep '^WATCH_URL=' | cut -d= -f2-)
+            notify "✅ **NICTIA Radio ${CHANNEL}**: YouTube Data API で broadcast 作成
+📋 WATCH_URL: ${api_url:-不明}
+⚡ enableAutoStart=True / 公開設定済み — RTMP active 後に自動 Go Live"
+            clear_was_live_recovery
+            return 0
+        fi
+        log "WARNING: yt_go_live.py failed (rc=$api_rc) — falling back to yt-dlp polling..."
+    fi
+
+    # ── フォールバック: yt-dlp でGo Liveをポーリング ──
+    # YouTube Data API 未設定時 or API 失敗時に使用
     if [ -z "${YOUTUBE_CHANNEL_ID:-}" ]; then return 1; fi
     log "Post-restart: waiting for YouTube Go Live (polling channel /live, max 180s)..."
     local attempt max_attempts=20 poll_interval=30
