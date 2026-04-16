@@ -117,6 +117,29 @@ def wait_for_stream_active(youtube, stream_id: str, max_wait: int = 300) -> bool
 # liveBroadcasts
 # ---------------------------------------------------------------------------
 
+def end_active_broadcasts(youtube, dry_run: bool = False) -> None:
+    """liveStream に紐づいている live 状態の broadcast を API で終了させる。"""
+    resp = youtube.liveBroadcasts().list(
+        part="id,snippet,status",
+        broadcastStatus="active",
+        maxResults=10,
+    ).execute()
+    for b in resp.get("items", []):
+        bid = b["id"]
+        title = b["snippet"]["title"][:50]
+        print(f"Ending active broadcast: {bid} ({title})")
+        if not dry_run:
+            try:
+                youtube.liveBroadcasts().transition(
+                    part="status",
+                    id=bid,
+                    broadcastStatus="complete",
+                ).execute()
+                print(f"  → Ended: {bid}")
+            except Exception as e:
+                print(f"  → WARNING: Could not end {bid}: {e}")
+
+
 def get_latest_broadcast_meta(youtube) -> tuple[str, str]:
     """直近の liveBroadcast からタイトルと説明文を取得する（新規作成時に引き継ぐ）。"""
     for status in ("active", "completed"):
@@ -278,6 +301,9 @@ def main() -> None:
     # 認証
     creds = load_credentials()
     youtube = build("youtube", "v3", credentials=creds)
+
+    # 既存の live broadcast を終了（新規作成前に必要）
+    end_active_broadcasts(youtube, dry_run=args.dry_run)
 
     # liveStream 検索
     stream = find_stream_by_key(youtube, stream_key)
