@@ -142,8 +142,12 @@ do_restart() {
     if [ -x "${YT_VENV_PYTHON:-}" ] && [ -f "${YT_GO_LIVE_PY:-}" ]; then
         log "Pre-start: calling yt_go_live.py (end old + create new broadcast)..."
         local api_output api_rc api_url
+        local no_monetize_flag=""
+        local yt_no_monetize
+        yt_no_monetize="$(grep '^YT_NO_MONETIZE=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
+        [ "$yt_no_monetize" = "true" ] && no_monetize_flag="--no-monetize"
         api_output=$("$YT_VENV_PYTHON" "$YT_GO_LIVE_PY" \
-            --channel "${CHANNEL^^}" --env-file "$ENV_FILE" 2>&1) || true
+            --channel "${CHANNEL^^}" --env-file "$ENV_FILE" ${no_monetize_flag} 2>&1) || true
         api_rc=$?
         echo "$api_output" | tail -10 | while IFS= read -r line; do log "$line"; done
         if [ $api_rc -eq 0 ]; then

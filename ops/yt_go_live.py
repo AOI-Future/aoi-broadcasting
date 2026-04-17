@@ -158,12 +158,13 @@ def get_latest_broadcast_meta(youtube) -> tuple[str, str]:
     return "", ""
 
 
-def create_broadcast(youtube, title: str, dry_run: bool = False) -> dict:
+def create_broadcast(youtube, title: str, dry_run: bool = False, monetize: bool = True) -> dict:
     """
     liveBroadcast を作成する。
     enableAutoStart=True + enableMonitorStream=False により
     RTMP ストリームが active になった瞬間に自動で live 遷移する。
     タイトル・説明文は直近のbroadcastから引き継ぐ。
+    monetize=True のとき収益化 On / Auto / High を設定する。
     """
     scheduled_start = (datetime.now(timezone.utc) + timedelta(seconds=60)).strftime(
         "%Y-%m-%dT%H:%M:%S.000Z"
@@ -198,13 +199,28 @@ def create_broadcast(youtube, title: str, dry_run: bool = False) -> dict:
         },
     }
 
+    parts = "id,snippet,status,contentDetails"
+
+    if monetize:
+        body["monetizationDetails"] = {
+            "adsMonetizationStatus": "on",
+            "cuepointSchedule": {
+                "enabled": True,
+                "ytOptimizedCuepointConfig": "HIGH",
+            },
+        }
+        parts += ",monetizationDetails"
+        print("Monetization: On / Auto / High")
+    else:
+        print("Monetization: disabled (--no-monetize)")
+
     if dry_run:
         print(f"[DRY RUN] Would create broadcast: {title}")
         return {"id": "DRY_RUN_BROADCAST_ID", "snippet": {"title": title}}
 
     print(f"Creating broadcast: {title}")
     response = youtube.liveBroadcasts().insert(
-        part="id,snippet,status,contentDetails",
+        part=parts,
         body=body,
     ).execute()
 
@@ -275,6 +291,8 @@ def main() -> None:
                         help="stream が active になるまで待機してから終了")
     parser.add_argument("--env-file",
                         help=".env ファイルのパス (省略時は ../.env.ch{n})")
+    parser.add_argument("--no-monetize", action="store_true",
+                        help="収益化設定をスキップ (YPP非対応チャンネル用)")
     args = parser.parse_args()
 
     ch_num = args.channel.lower().replace("ch", "")
@@ -318,7 +336,8 @@ def main() -> None:
 
     # Broadcast 作成
     try:
-        broadcast = create_broadcast(youtube, title, dry_run=args.dry_run)
+        broadcast = create_broadcast(youtube, title, dry_run=args.dry_run,
+                                     monetize=not args.no_monetize)
     except HttpError as e:
         print(f"ERROR creating broadcast: {e}")
         sys.exit(1)
