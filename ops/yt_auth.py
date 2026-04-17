@@ -71,14 +71,17 @@ def authenticate(token_file: Path = TOKEN_FILE, headless: bool = False) -> Crede
     # ブラウザが使える環境: run_local_server() でリダイレクトを自動キャッチ
     # ブラウザなし (VPS): --headless フラグで手動コード入力
     if headless:
+        flow.redirect_uri = "http://localhost"
         print("Headless mode: Visit the URL below and paste the authorization code.")
         print()
         auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
         print(f"Open this URL:\n  {auth_url}\n")
         print("※ 複数チャンネルある場合: ブラウザで認証後、チャンネル選択画面が出たら対象チャンネルに切り替えてください")
+        print("※ 認証後にブラウザが localhost に繋がらないエラーになりますが正常です")
+        print("  → アドレスバーの URL から code= の値をコピーしてください")
         print()
         code = input("Enter authorization code: ").strip()
-        flow.fetch_token(code=code)
+        flow.fetch_token(code=code, redirect_uri="http://localhost")
         creds = flow.credentials
     else:
         print("Opening browser for OAuth authorization...")
