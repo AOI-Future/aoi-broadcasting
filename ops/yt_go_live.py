@@ -36,7 +36,10 @@ except ImportError:
 
 SCOPES = ["https://www.googleapis.com/auth/youtube"]
 CREDENTIALS_DIR = Path(__file__).parent / "credentials"
-TOKEN_FILE = CREDENTIALS_DIR / "token.json"
+TOKEN_FILES = {
+    "CH1": CREDENTIALS_DIR / "token.json",
+    "CH2": CREDENTIALS_DIR / "token_ch2.json",
+}
 
 JST = timezone(timedelta(hours=9))
 
@@ -45,21 +48,24 @@ JST = timezone(timedelta(hours=9))
 # Auth
 # ---------------------------------------------------------------------------
 
-def load_credentials() -> Credentials:
-    if not TOKEN_FILE.exists():
-        print(f"ERROR: {TOKEN_FILE} not found. Run yt_auth.py first.")
+def load_credentials(channel: str = "CH1") -> Credentials:
+    token_file = TOKEN_FILES.get(channel.upper(), TOKEN_FILES["CH1"])
+    if not token_file.exists():
+        alt = "token_ch2.json" if channel.upper() == "CH2" else "token.json"
+        print(f"ERROR: {token_file} not found.")
+        print(f"Run: python3 ops/yt_auth.py --headless --token-file ops/credentials/{alt}")
         sys.exit(1)
 
-    creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
+    creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
 
     if creds.expired and creds.refresh_token:
         print("Refreshing expired token...")
         creds.refresh(Request())
-        TOKEN_FILE.write_text(creds.to_json())
+        token_file.write_text(creds.to_json())
         print("Token refreshed.")
 
     if not creds.valid:
-        print("ERROR: Token is invalid. Run yt_auth.py to re-authenticate.")
+        print(f"ERROR: Token is invalid. Run yt_auth.py --headless --token-file ops/credentials/{token_file.name}")
         sys.exit(1)
 
     return creds
@@ -321,8 +327,8 @@ def main() -> None:
     if args.dry_run:
         print("[DRY RUN MODE — no API calls]")
 
-    # 認証
-    creds = load_credentials()
+    # 認証（チャンネルに対応したトークンファイルを使用）
+    creds = load_credentials(channel=args.channel)
     youtube = build("youtube", "v3", credentials=creds)
 
     # liveStream 検索（stream_id 確定後に終了処理を行うため先に実行）

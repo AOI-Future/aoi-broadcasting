@@ -33,18 +33,18 @@ CLIENT_SECRET_FILE = CREDENTIALS_DIR / "client_secret.json"
 TOKEN_FILE = CREDENTIALS_DIR / "token.json"
 
 
-def authenticate() -> Credentials:
+def authenticate(token_file: Path = TOKEN_FILE, headless: bool = False) -> Credentials:
     creds = None
 
     # 既存トークンを読み込む
-    if TOKEN_FILE.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
+    if token_file.exists():
+        creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
 
     # 有効期限切れなら更新
     if creds and creds.expired and creds.refresh_token:
         print("Refreshing expired token...")
         creds.refresh(Request())
-        _save_token(creds)
+        _save_token(creds, token_file)
         print("Token refreshed successfully.")
         return creds
 
@@ -70,30 +70,41 @@ def authenticate() -> Credentials:
 
     # ブラウザが使える環境: run_local_server() でリダイレクトを自動キャッチ
     # ブラウザなし (VPS): --headless フラグで手動コード入力
-    import sys
-    if "--headless" in sys.argv:
+    if headless:
         print("Headless mode: Visit the URL below and paste the authorization code.")
         print()
         auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
         print(f"Open this URL:\n  {auth_url}\n")
+        print("※ 複数チャンネルある場合: ブラウザで認証後、チャンネル選択画面が出たら対象チャンネルに切り替えてください")
+        print()
         code = input("Enter authorization code: ").strip()
         flow.fetch_token(code=code)
         creds = flow.credentials
     else:
         print("Opening browser for OAuth authorization...")
         creds = flow.run_local_server(port=0, open_browser=True)
-    _save_token(creds)
-    print(f"\nToken saved to: {TOKEN_FILE}")
+    _save_token(creds, token_file)
+    print(f"\nToken saved to: {token_file}")
     return creds
 
 
-def _save_token(creds: Credentials) -> None:
-    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_FILE.write_text(creds.to_json())
+def _save_token(creds: Credentials, token_file: Path = TOKEN_FILE) -> None:
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    token_file.write_text(creds.to_json())
 
 
 if __name__ == "__main__":
-    creds = authenticate()
+    import argparse as _argparse
+    parser = _argparse.ArgumentParser(description="YouTube Data API OAuth2 認証")
+    parser.add_argument("--headless", action="store_true",
+                        help="ブラウザなし環境（VPS）で手動コード入力モード")
+    parser.add_argument("--token-file", default=str(TOKEN_FILE),
+                        help=f"保存先トークンファイル (default: {TOKEN_FILE})\n"
+                             "CH2用: ops/credentials/token_ch2.json")
+    args = parser.parse_args()
+
+    token_path = Path(args.token_file)
+    creds = authenticate(token_file=token_path, headless=args.headless)
     print()
     print("Authentication successful!")
     print(f"Token valid: {creds.valid}")
@@ -103,5 +114,5 @@ if __name__ == "__main__":
         print("NOTE: Testing mode tokens expire in 7 days.")
         print("      Production mode (OAuth consent screen verification) → indefinite.")
     print()
-    print("Next: transfer token.json to VPS if needed:")
-    print("  scp ops/credentials/token.json contabo:/home/shugo/services/aoi-broadcasting/ops/credentials/")
+    print("Next: transfer token file to VPS if needed:")
+    print(f"  scp {token_path} contabo:/home/shugo/services/aoi-broadcasting/ops/credentials/")
