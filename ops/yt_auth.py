@@ -81,7 +81,7 @@ def authenticate(token_file: Path = TOKEN_FILE, headless: bool = False) -> Crede
         print("  → アドレスバーの URL から code= の値をコピーしてください")
         print()
         code = input("Enter authorization code: ").strip()
-        flow.fetch_token(code=code, redirect_uri="http://localhost")
+        flow.fetch_token(code=code)
         creds = flow.credentials
     else:
         print("Opening browser for OAuth authorization...")
