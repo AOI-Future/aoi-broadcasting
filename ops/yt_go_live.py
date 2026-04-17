@@ -117,17 +117,22 @@ def wait_for_stream_active(youtube, stream_id: str, max_wait: int = 300) -> bool
 # liveBroadcasts
 # ---------------------------------------------------------------------------
 
-def end_active_broadcasts(youtube, dry_run: bool = False) -> None:
-    """liveStream に紐づいている live 状態の broadcast を API で終了させる。"""
+def end_broadcasts_for_stream(youtube, stream_id: str, dry_run: bool = False) -> None:
+    """stream_id に bind されている active broadcast のみ終了させる。
+    他チャンネルの broadcast は boundStreamId が異なるためスキップされる。"""
     resp = youtube.liveBroadcasts().list(
-        part="id,snippet,status",
+        part="id,snippet,status,contentDetails",
         broadcastStatus="active",
         maxResults=10,
     ).execute()
     for b in resp.get("items", []):
+        bound = b.get("contentDetails", {}).get("boundStreamId", "")
         bid = b["id"]
         title = b["snippet"]["title"][:50]
-        print(f"Ending active broadcast: {bid} ({title})")
+        if bound != stream_id:
+            print(f"Skipping broadcast {bid} ({title}) — bound to {bound or 'none'}")
+            continue
+        print(f"Ending broadcast for stream {stream_id}: {bid} ({title})")
         if not dry_run:
             try:
                 youtube.liveBroadcasts().transition(
@@ -320,15 +325,15 @@ def main() -> None:
     creds = load_credentials()
     youtube = build("youtube", "v3", credentials=creds)
 
-    # 既存の live broadcast を終了（新規作成前に必要）
-    end_active_broadcasts(youtube, dry_run=args.dry_run)
-
-    # liveStream 検索
+    # liveStream 検索（stream_id 確定後に終了処理を行うため先に実行）
     stream = find_stream_by_key(youtube, stream_key)
     if not stream:
         print("ERROR: liveStream not found. Verify YOUTUBE_KEY is correct.")
         sys.exit(2)
     stream_id = stream["id"]
+
+    # 自チャンネルの stream に bind された broadcast のみ終了（他チャンネルのは触らない）
+    end_broadcasts_for_stream(youtube, stream_id, dry_run=args.dry_run)
 
     # タイトル生成
     now_jst = datetime.now(JST)
