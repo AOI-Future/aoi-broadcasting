@@ -151,8 +151,8 @@ def end_broadcasts_for_stream(youtube, stream_id: str, dry_run: bool = False) ->
                 print(f"  → WARNING: Could not end {bid}: {e}")
 
 
-def get_latest_broadcast_meta(youtube) -> tuple[str, str]:
-    """直近の liveBroadcast からタイトルと説明文を取得する（新規作成時に引き継ぐ）。"""
+def get_latest_broadcast_meta(youtube) -> tuple[str, str, list[str]]:
+    """直近の liveBroadcast からタイトル・説明文・タグを取得する（フォールバック用）。"""
     for status in ("active", "completed"):
         try:
             resp = youtube.liveBroadcasts().list(
@@ -163,38 +163,75 @@ def get_latest_broadcast_meta(youtube) -> tuple[str, str]:
             items = resp.get("items", [])
             if items:
                 snip = items[0]["snippet"]
-                return snip.get("title", ""), snip.get("description", "")
+                tags = snip.get("tags") or []
+                return snip.get("title", ""), snip.get("description", ""), tags
         except Exception:
             pass
-    return "", ""
+    return "", "", []
 
 
-def create_broadcast(youtube, title: str, dry_run: bool = False, monetize: bool = True) -> dict:
+def read_env_broadcast_meta(env_file: Path) -> tuple[str, str, list[str]]:
+    """
+    .env ファイルから番組メタデータを読み込む。
+    Returns: (title, description, tags)
+
+    対応キー:
+      YOUTUBE_BROADCAST_TITLE       番組タイトル
+      YOUTUBE_BROADCAST_DESCRIPTION 説明文（\\n で改行）
+      YOUTUBE_BROADCAST_TAGS        タグ（カンマ区切り）
+    """
+    title = description = ""
+    tags: list[str] = []
+
+    if not env_file.exists():
+        return title, description, tags
+
+    for raw_line in env_file.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if key == "YOUTUBE_BROADCAST_TITLE":
+            title = value
+        elif key == "YOUTUBE_BROADCAST_DESCRIPTION":
+            description = value.replace("\\n", "\n")
+        elif key == "YOUTUBE_BROADCAST_TAGS":
+            tags = [t.strip() for t in value.split(",") if t.strip()]
+
+    return title, description, tags
+
+
+def create_broadcast(
+    youtube,
+    title: str,
+    description: str,
+    tags: list[str],
+    dry_run: bool = False,
+    monetize: bool = True,
+) -> dict:
     """
     liveBroadcast を作成する。
     enableAutoStart=True + enableMonitorStream=False により
     RTMP ストリームが active になった瞬間に自動で live 遷移する。
-    タイトル・説明文は直近のbroadcastから引き継ぐ。
     monetize=True のとき収益化 On / Auto / High を設定する。
     """
     scheduled_start = (datetime.now(timezone.utc) + timedelta(seconds=60)).strftime(
         "%Y-%m-%dT%H:%M:%S.000Z"
     )
 
-    # 直近broadcastのメタデータを引き継ぐ
-    prev_title, prev_desc = ("", "") if dry_run else get_latest_broadcast_meta(youtube)
-    use_title = prev_title if prev_title else title
-    use_desc = prev_desc if prev_desc else "NICTIA Radio — AI-powered ambient music station by AOI Future"
-    if prev_title:
-        print(f"Inheriting title from previous broadcast: {use_title[:60]}...")
-    if prev_desc:
-        print(f"Inheriting description ({len(use_desc)} chars)")
+    # YouTube タグ制約: 各タグ 30 文字以内、合計 500 文字以内、最大 30 個
+    sanitized_tags = [t[:30] for t in tags[:30]]
+    if sum(len(t) for t in sanitized_tags) > 500:
+        sanitized_tags = sanitized_tags[:10]
 
     body = {
         "snippet": {
-            "title": use_title,
+            "title": title,
             "scheduledStartTime": scheduled_start,
-            "description": use_desc,
+            "description": description,
+            "tags": sanitized_tags,
         },
         "status": {
             "privacyStatus": "public",
@@ -217,7 +254,7 @@ def create_broadcast(youtube, title: str, dry_run: bool = False, monetize: bool 
             "adsMonetizationStatus": "on",
             "cuepointSchedule": {
                 "enabled": True,
-                "ytOptimizedCuepointConfig": "HIGH",
+                "ytOptimizedCuepointConfig": "HIGH",  # 広告挿入頻度: 高
             },
         }
         parts += ",monetizationDetails"
@@ -227,9 +264,12 @@ def create_broadcast(youtube, title: str, dry_run: bool = False, monetize: bool 
 
     if dry_run:
         print(f"[DRY RUN] Would create broadcast: {title}")
+        print(f"[DRY RUN] Tags: {sanitized_tags}")
+        print(f"[DRY RUN] Monetize: {monetize}")
         return {"id": "DRY_RUN_BROADCAST_ID", "snippet": {"title": title}}
 
     print(f"Creating broadcast: {title}")
+    print(f"  Tags ({len(sanitized_tags)}): {sanitized_tags}")
     response = youtube.liveBroadcasts().insert(
         part=parts,
         body=body,
@@ -341,14 +381,33 @@ def main() -> None:
     # 自チャンネルの stream に bind された broadcast のみ終了（他チャンネルのは触らない）
     end_broadcasts_for_stream(youtube, stream_id, dry_run=args.dry_run)
 
-    # タイトル生成
+    # ─── メタデータ決定 (優先順位: .env > 直前のbroadcast > デフォルト) ───
     now_jst = datetime.now(JST)
-    title = f"NICTIA Radio {now_jst.strftime('%Y-%m-%d')} {args.channel}"
+    default_title = f"NICTIA Radio {now_jst.strftime('%Y-%m-%d')} {args.channel}"
+    default_desc = "NICTIA Radio — AI-powered ambient music station by AOI Future"
+
+    env_title, env_desc, env_tags = ("", "", []) if args.dry_run else read_env_broadcast_meta(env_file)
+
+    if env_title and env_desc and env_tags:
+        # .env にすべて揃っている → そのまま使用
+        use_title, use_desc, use_tags = env_title, env_desc, env_tags
+        print(f"Metadata from .env: title={use_title[:60]!r}  tags={use_tags}")
+    else:
+        # 直前の broadcast から引き継ぎ（.env に不足分がある場合のフォールバック）
+        prev_title, prev_desc, prev_tags = ("", "", []) if args.dry_run else get_latest_broadcast_meta(youtube)
+        use_title = env_title or prev_title or default_title
+        use_desc  = env_desc  or prev_desc  or default_desc
+        use_tags  = env_tags  or prev_tags  or []
+        source = ".env(partial)+API" if (env_title or env_desc or env_tags) else ("API" if prev_title else "default")
+        print(f"Metadata source: {source}  title={use_title[:60]!r}  tags={use_tags}")
 
     # Broadcast 作成
     try:
-        broadcast = create_broadcast(youtube, title, dry_run=args.dry_run,
-                                     monetize=not args.no_monetize)
+        broadcast = create_broadcast(
+            youtube, use_title, use_desc, use_tags,
+            dry_run=args.dry_run,
+            monetize=not args.no_monetize,
+        )
     except HttpError as e:
         print(f"ERROR creating broadcast: {e}")
         sys.exit(1)
