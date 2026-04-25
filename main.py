@@ -227,12 +227,12 @@ def _video_signature(clip: Path) -> str:
 
 
 def _video_cache_path(clip: Path) -> Path:
-    return VIDEO_CACHE_DIR / f"{clip.stem}.{_video_signature(clip)}.ts"
+    return VIDEO_CACHE_DIR / f"{clip.stem}.{_video_signature(clip)}.flv"
 
 
 def _encode_video_clip(clip: Path, out: Path) -> bool:
     VIDEO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(suffix=".ts", dir=str(VIDEO_CACHE_DIR))
+    fd, tmp_path = tempfile.mkstemp(suffix=".flv", dir=str(VIDEO_CACHE_DIR))
     os.close(fd)
     tmp = Path(tmp_path)
     cmd = [
@@ -250,7 +250,7 @@ def _encode_video_clip(clip: Path, out: Path) -> bool:
         "-g", str(int(float(VIDEO_FPS)) * 2),
         "-color_range", "tv",
         "-an",
-        "-f", "mpegts",
+        "-f", "flv",
         str(tmp),
     ]
     try:
@@ -287,7 +287,7 @@ def prune_video_cache() -> int:
         return 0
     expected = {_video_cache_path(clip).name for clip in source_video_clips()}
     removed = 0
-    for cached in VIDEO_CACHE_DIR.glob("*.ts"):
+    for cached in VIDEO_CACHE_DIR.glob("*.flv"):
         if not cached.is_file() or cached.is_symlink():
             continue
         if cached.name in expected:
