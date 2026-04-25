@@ -109,6 +109,52 @@ class MusicDirFingerprintTests(unittest.TestCase):
         self.assertEqual(fp_before, fp_after)
 
 
+class VideoClipTests(unittest.TestCase):
+    def test_source_video_clips_empty_when_no_video_dir(self):
+        old_music = main.MUSIC_DIR
+        with tempfile.TemporaryDirectory() as d:
+            main.MUSIC_DIR = Path(d)
+            try:
+                clips = main.source_video_clips()
+            finally:
+                main.MUSIC_DIR = old_music
+        self.assertEqual(clips, [])
+
+    def test_source_video_clips_skips_unsafe_and_symlink(self):
+        old_music = main.MUSIC_DIR
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            video_dir = root / "video"
+            video_dir.mkdir()
+            safe = video_dir / "clip.mp4"
+            unsafe = video_dir / "bad\nname.mp4"
+            safe.write_bytes(b"FTYP")
+            unsafe.write_bytes(b"FTYP")
+            (video_dir / "link.mp4").symlink_to(safe)
+
+            main.MUSIC_DIR = root
+            try:
+                clips = main.source_video_clips()
+            finally:
+                main.MUSIC_DIR = old_music
+
+        self.assertEqual([p.name for p in clips], ["clip.mp4"])
+
+    def test_build_video_playlist_repeat_count(self):
+        old_repeat = main.VIDEO_REPEAT_COUNT
+        main.VIDEO_REPEAT_COUNT = 3
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                clips = [Path(d) / "a.mp4", Path(d) / "b.mp4"]
+                for c in clips:
+                    c.write_bytes(b"FTYP")
+                playlist = main.build_video_playlist(clips, d)
+                lines = playlist.read_text().strip().splitlines()
+                self.assertEqual(len(lines), 6)  # 2 clips × 3 repeats
+        finally:
+            main.VIDEO_REPEAT_COUNT = old_repeat
+
+
 class ChunkPlaylistTests(unittest.TestCase):
     def test_chunk_playlist_single_repeat(self):
         with tempfile.TemporaryDirectory() as d:

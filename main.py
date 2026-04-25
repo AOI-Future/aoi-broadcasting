@@ -76,6 +76,14 @@ MUSIC_CHANGE_DEBOUNCE = _env_int("MUSIC_CHANGE_DEBOUNCE", 60, minimum=0)
 STREAM_HEARTBEAT_INTERVAL = _env_int("STREAM_HEARTBEAT_INTERVAL", 120, minimum=30)
 FFMPEG_NORMALIZE_TIMEOUT = _env_int("FFMPEG_NORMALIZE_TIMEOUT", 1800, minimum=30)
 FFMPEG_LOOP_PREENCODE_TIMEOUT = _env_int("FFMPEG_LOOP_PREENCODE_TIMEOUT", 120, minimum=15)
+FFMPEG_VIDEO_ENCODE_TIMEOUT = _env_int("FFMPEG_VIDEO_ENCODE_TIMEOUT", 600, minimum=30)
+
+VIDEO_CACHE_DIR = Path("/data/video_cache")
+_VIDEO_EXTENSIONS = ("*.mp4", "*.mov", "*.mkv", "*.avi", "*.webm")
+VIDEO_FPS = os.environ.get("VIDEO_FPS", "24").strip() or "24"
+VIDEO_BITRATE = os.environ.get("VIDEO_BITRATE", "1500k").strip() or "1500k"
+VIDEO_REPEAT_COUNT = _env_int("VIDEO_REPEAT_COUNT", 500, minimum=1)
+VIDEO_SHUFFLE = os.environ.get("VIDEO_SHUFFLE", "true").lower() in ("true", "1", "yes")
 
 _CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -196,6 +204,100 @@ def prune_normalized_cache() -> int:
     return removed
 
 
+def source_video_clips() -> list[Path]:
+    video_dir = MUSIC_DIR / "video"
+    if not video_dir.exists():
+        return []
+    clips: list[Path] = []
+    for pattern in _VIDEO_EXTENSIONS:
+        for p in video_dir.glob(pattern):
+            if not p.is_file() or p.is_symlink():
+                continue
+            if _CONTROL_CHAR_PATTERN.search(p.name):
+                log.warning("Skipping unsafe video filename: %r", p.name)
+                continue
+            clips.append(p)
+    return sorted(clips)
+
+
+def _video_signature(clip: Path) -> str:
+    st = clip.stat()
+    payload = f"{clip.name}:{st.st_size}:{st.st_mtime_ns}:{VIDEO_FPS}:{VIDEO_BITRATE}".encode()
+    return hashlib.sha256(payload).hexdigest()[:12]
+
+
+def _video_cache_path(clip: Path) -> Path:
+    return VIDEO_CACHE_DIR / f"{clip.stem}.{_video_signature(clip)}.mp4"
+
+
+def _encode_video_clip(clip: Path, out: Path) -> bool:
+    VIDEO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(suffix=".mp4", dir=str(VIDEO_CACHE_DIR))
+    os.close(fd)
+    tmp = Path(tmp_path)
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(clip),
+        "-vf", (
+            "scale=1280:720:force_original_aspect_ratio=decrease,"
+            "pad=1280:720:(ow-iw)/2:(oh-ih)/2,"
+            "format=yuv420p"
+        ),
+        "-c:v", "libx264",
+        "-preset", "slow",
+        "-b:v", VIDEO_BITRATE,
+        "-r", VIDEO_FPS,
+        "-g", str(int(float(VIDEO_FPS)) * 2),
+        "-color_range", "tv",
+        "-an",
+        str(tmp),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=FFMPEG_VIDEO_ENCODE_TIMEOUT)
+        tmp.replace(out)
+        log.info("Video clip encoded: %s -> %s", clip.name, out.name)
+        return True
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+        log.warning("Failed to encode video %s: %s", clip.name, stderr.strip())
+        tmp.unlink(missing_ok=True)
+        return False
+    except subprocess.TimeoutExpired:
+        log.warning("Video encode timed out for %s after %ds", clip.name, FFMPEG_VIDEO_ENCODE_TIMEOUT)
+        tmp.unlink(missing_ok=True)
+        return False
+
+
+def ensure_video_cache(clips: list[Path]) -> list[Path]:
+    """Pre-encode clips to consistent spec. Returns list of ready cached paths."""
+    ready: list[Path] = []
+    for clip in clips:
+        cached = _video_cache_path(clip)
+        if not cached.exists():
+            log.info("Pre-encoding video: %s ...", clip.name)
+            _encode_video_clip(clip, cached)
+        if cached.exists():
+            ready.append(cached)
+    return ready
+
+
+def prune_video_cache() -> int:
+    if not VIDEO_CACHE_DIR.exists():
+        return 0
+    expected = {_video_cache_path(clip).name for clip in source_video_clips()}
+    removed = 0
+    for cached in VIDEO_CACHE_DIR.glob("*.mp4"):
+        if not cached.is_file() or cached.is_symlink():
+            continue
+        if cached.name in expected:
+            continue
+        cached.unlink(missing_ok=True)
+        removed += 1
+    if removed:
+        log.info("Pruned %d stale video cache file(s)", removed)
+    return removed
+
+
 def _normalize_track(track: Path, normalized_path: Path) -> bool:
     NORMALIZED_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -266,11 +368,12 @@ def normalize_tracks(max_files: int) -> int:
     return normalized
 
 
-def run_idle_maintenance() -> tuple[int, int, int]:
+def run_idle_maintenance() -> tuple[int, int, int, int]:
     archived = archive_old_files()
     pruned = prune_archive()
     removed_cache = prune_normalized_cache()
-    return archived, pruned, removed_cache
+    removed_video = prune_video_cache()
+    return archived, pruned, removed_cache, removed_video
 
 
 class BackgroundNormalizer:
@@ -343,6 +446,24 @@ def build_playlist(tracks: list[Path], tmpdir: str, repeat: int | None = None) -
                 f.write(f"file '{safe}'\n")
     total = len(tracks) * repeat_count
     log.info("Playlist: %d tracks (%d unique × %d repeat cycles)", total, len(tracks), repeat_count)
+    return playlist
+
+
+def build_video_playlist(cached_clips: list[Path], tmpdir: str) -> Path:
+    playlist = Path(tmpdir) / "video_playlist.txt"
+    with open(playlist, "w", encoding="utf-8") as f:
+        for i in range(VIDEO_REPEAT_COUNT):
+            cycle = cached_clips.copy()
+            if VIDEO_SHUFFLE and i > 0:
+                random.shuffle(cycle)
+            for clip in cycle:
+                safe = str(clip).replace("'", "'\\''")
+                f.write(f"file '{safe}'\n")
+    total = len(cached_clips) * VIDEO_REPEAT_COUNT
+    log.info(
+        "Video playlist: %d entries (%d clips × %d repeats)",
+        total, len(cached_clips), VIDEO_REPEAT_COUNT,
+    )
     return playlist
 
 
@@ -471,6 +592,7 @@ def run_ffmpeg(
     output_tee: str,
     fingerprint: str | None = None,
     normalizer: BackgroundNormalizer | None = None,
+    video_playlist: Path | None = None,
 ) -> tuple[int, bool]:
     """Run ffmpeg for one playlist chunk.
 
@@ -478,15 +600,26 @@ def run_ffmpeg(
     ``True`` when a directory change was detected and ffmpeg was stopped
     early so the caller can rebuild the playlist.
     """
-    _ensure_loop_video()
+    if video_playlist is not None:
+        video_input_args = [
+            "-re",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(video_playlist),
+        ]
+        log.info("Video source: clip playlist (%s)", video_playlist.name)
+    else:
+        _ensure_loop_video()
+        video_input_args = [
+            "-re",
+            "-stream_loop", "-1",
+            "-i", str(LOOP_VIDEO),
+        ]
+        log.info("Video source: static background loop")
 
     cmd = [
         "ffmpeg",
-        "-re",
-        "-stream_loop",
-        "-1",
-        "-i",
-        str(LOOP_VIDEO),
+        *video_input_args,
         "-f",
         "concat",
         "-safe",
@@ -606,12 +739,13 @@ def main() -> None:
 
     while True:
         try:
-            archived, pruned, removed_cache = run_idle_maintenance()
+            archived, pruned, removed_cache, removed_video = run_idle_maintenance()
             log.debug(
-                "Idle maintenance summary: archived=%d pruned=%d stale_normalized=%d",
+                "Idle maintenance summary: archived=%d pruned=%d stale_normalized=%d stale_video=%d",
                 archived,
                 pruned,
                 removed_cache,
+                removed_video,
             )
 
             sources = source_tracks()
@@ -640,7 +774,18 @@ def main() -> None:
                 time.sleep(WAIT_NO_MUSIC)
                 continue
 
+            # Pre-encode any new video clips; pick up additions each cycle automatically
+            raw_clips = source_video_clips()
+            if raw_clips:
+                ready_clips = ensure_video_cache(raw_clips)
+                log.info("Video: %d/%d clip(s) ready", len(ready_clips), len(raw_clips))
+            else:
+                ready_clips = []
+                log.info("Video: no clips in %s/video/, using static background", MUSIC_DIR)
+
             with tempfile.TemporaryDirectory() as tmpdir:
+                video_pl = build_video_playlist(ready_clips, tmpdir) if ready_clips else None
+
                 if PLAYLIST_CHUNK_SIZE > 0:
                     # Chunk-based playback
                     fingerprint = _music_dir_fingerprint()
@@ -653,7 +798,12 @@ def main() -> None:
                             len(chunk),
                         )
                         playlist = build_playlist(chunk, tmpdir, repeat=1)
-                        rc, music_changed = run_ffmpeg(playlist, output_tee, fingerprint=fingerprint, normalizer=normalizer)
+                        rc, music_changed = run_ffmpeg(
+                            playlist, output_tee,
+                            fingerprint=fingerprint,
+                            normalizer=normalizer,
+                            video_playlist=video_pl,
+                        )
                         log.info("ffmpeg exited with code %d", rc)
                         restart_delay = RESTART_DELAY if rc == 0 else min(restart_delay * 2, MAX_RESTART_DELAY)
                         if music_changed:
@@ -663,7 +813,11 @@ def main() -> None:
                 else:
                     # Legacy mode: single giant playlist
                     playlist = build_playlist(tracks, tmpdir)
-                    rc, _changed = run_ffmpeg(playlist, output_tee, normalizer=normalizer)
+                    rc, _changed = run_ffmpeg(
+                        playlist, output_tee,
+                        normalizer=normalizer,
+                        video_playlist=video_pl,
+                    )
                     log.info("ffmpeg exited with code %d", rc)
                     restart_delay = RESTART_DELAY if rc == 0 else min(restart_delay * 2, MAX_RESTART_DELAY)
 

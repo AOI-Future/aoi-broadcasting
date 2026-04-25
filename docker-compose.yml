@@ -25,6 +25,7 @@ services:
     volumes:
       - ${MUSIC_DIR_CH1:-/opt/suno-mcp/music_data/ch1}:/data/music:ro
       - ./normalized/ch1:/data/normalized
+      - ./video_cache/ch1:/data/video_cache
       - ./assets/ch1:/app/assets:ro
 
   ch2:
@@ -35,4 +36,5 @@ services:
     volumes:
       - ${MUSIC_DIR_CH2:-/opt/suno-mcp/music_data/ch2}:/data/music:ro
       - ./normalized/ch2:/data/normalized
+      - ./video_cache/ch2:/data/video_cache
       - ./assets/ch2:/app/assets:ro
