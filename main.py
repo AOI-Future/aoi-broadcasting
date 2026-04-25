@@ -630,6 +630,8 @@ def run_ffmpeg(
         "copy",
         "-bsf:v",
         "h264_mp4toannexb",
+        "-tag:v",
+        "h264",
         "-c:a",
         "aac",
         "-b:a",
