@@ -628,6 +628,8 @@ def run_ffmpeg(
         str(playlist),
         "-c:v",
         "copy",
+        "-bsf:v",
+        "h264_mp4toannexb",
         "-c:a",
         "aac",
         "-b:a",
