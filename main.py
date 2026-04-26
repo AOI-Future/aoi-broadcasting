@@ -106,31 +106,36 @@ def _normalized_path(track: Path) -> Path:
     return NORMALIZED_DIR / f"{track.stem}.{_normalization_signature(track)}.wav"
 
 
+_MUSIC_EXTENSIONS = ("*.wav", "*.flac", "*.mp3")
+
+
 def _music_dir_fingerprint() -> str:
     """Return a hash summarising the current state of the music directory."""
     entries: list[str] = []
-    for p in sorted(MUSIC_DIR.glob("*.wav")):
-        if not p.is_file() or p.is_symlink():
-            continue
-        try:
-            st = p.stat()
-            entries.append(f"{p.name}:{st.st_size}:{st.st_mtime_ns}")
-        except OSError:
-            continue
-    payload = "\n".join(entries).encode("utf-8")
+    for ext in _MUSIC_EXTENSIONS:
+        for p in MUSIC_DIR.glob(ext):
+            if not p.is_file() or p.is_symlink():
+                continue
+            try:
+                st = p.stat()
+                entries.append(f"{p.name}:{st.st_size}:{st.st_mtime_ns}")
+            except OSError:
+                continue
+    payload = "\n".join(sorted(entries)).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 
 def source_tracks() -> list[Path]:
     tracks: list[Path] = []
-    for p in sorted(MUSIC_DIR.glob("*.wav")):
-        if not p.is_file() or p.is_symlink():
-            continue
-        if _CONTROL_CHAR_PATTERN.search(p.name):
-            log.warning("Skipping unsafe filename containing control chars: %r", p.name)
-            continue
-        tracks.append(p)
-    return tracks
+    for ext in _MUSIC_EXTENSIONS:
+        for p in MUSIC_DIR.glob(ext):
+            if not p.is_file() or p.is_symlink():
+                continue
+            if _CONTROL_CHAR_PATTERN.search(p.name):
+                log.warning("Skipping unsafe filename containing control chars: %r", p.name)
+                continue
+            tracks.append(p)
+    return sorted(tracks)
 
 
 def stream_ready_tracks(tracks: list[Path]) -> list[Path]:
